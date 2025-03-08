@@ -1,0 +1,18 @@
+---
+layout: '@/layouts/PageLayout.astro'
+asideCards: 
+  - CardInfo
+  - CardMarkdown:
+      title: 技术栈
+      content: |
+        - cocos creator
+        - unity
+        - pixi
+title: 'Pili 噼里 介绍'
+titleShow: false
+---
+
+import { readFileSync } from '@/utils'
+import Markdown from '@/components/atomic/Markdown.astro'
+
+<Markdown render set:html={readFileSync('./README.md')}/>
