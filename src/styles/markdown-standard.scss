@@ -1,6 +1,9 @@
+.text-16px .markdown-standard {
+  font-size: 16px;
+}
 .markdown-standard {
   font-size: 14px;
-  line-height: 2.4;
+  line-height: 2.2;
   & {
     --table-border-color: #ccc;
     --table-thead-bg-color: #f5f6f8;
@@ -133,6 +136,8 @@
   ul {
     list-style-type: circle;
     padding-left: 1.5em;
+    padding-right: 2px;
+    overflow: auto;
   }
   li {
     position: relative;

@@ -7,6 +7,7 @@ import Markdown from '@/components/atomic/Markdown.astro'
 import PostMeta from '@/components/PostMeta.astro'
 import If from '@/components/atomic/If.astro'
 import InputPassword from '@/components/widget/InputPassword.astro'
+import PostComments from "@/components/PostComments.astro";
 
 export const getStaticPaths = async () =>
   posts.map((post) => ({
@@ -50,4 +51,6 @@ const { Content, headings } = await render(post)
       </If>
     </Markdown>
   </div>
+  <PostComments />
+
 </PageLayout>

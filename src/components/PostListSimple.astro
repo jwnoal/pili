@@ -19,7 +19,7 @@ const postsByYear = sort(posts).reduce((_, post) => {
 <div>
 {Object.keys(postsByYear).sort().reverse().map(year =>(
   <div id={year} class="text-xl mb-5">{year}</div>
-  <div class="text-sm">{postsByYear[year].map(post=>(
+  <div class="">{postsByYear[year].map(post=>(
 
     <div class="mb-8">
        <div class="flex items-center mb-2 text-0.8rem">

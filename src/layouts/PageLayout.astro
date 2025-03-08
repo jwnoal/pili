@@ -2,7 +2,6 @@
 import BaseLayout from "@/layouts/BaseLayout.astro";
 import TitleHuge from "@/components/widget/TitleHuge.astro";
 import type { EnsuredCardParams } from "@/components/AsideCards";
-import PostComments from "@/components/PostComments.astro";
 type Props = {
   frontmatter?: Props; //for .mdx layout
 } & {
@@ -26,10 +25,9 @@ const {
 ---
 
 <BaseLayout subtitle={title} description={title} {asideOff} {asideCards}>
-  <div class="card wfull p8 lg:p13">
+  <div class="card wfull p7 lg:p13">
     <TitleHuge {title} {titleIcon} {titleColor} {titleShow} {titleIconOff} />
     <slot />
-    <PostComments />
   </div>
   <slot name="after" />
 </BaseLayout>

@@ -30,10 +30,10 @@ const { post } = Astro.props
   <div class="pt-3 pb-4"><PostMeta post={post}/></div>
   <div class="min-h-5em p3">
     <If condition={!post.data.password}>
-      <div class="text-sm my3"><Markdown render set:html={post.data.description}/></div>
+      <div class="text-16px my3"><Markdown render set:html={post.data.description}/></div>
     </If>
     <If condition={post.data.password}>
-      <div class="text-sm my3"><Markdown render set:html={post.data.encrypt.description}/></div>
+      <div class="text-16px my3"><Markdown render set:html={post.data.encrypt.description}/></div>
     </If>
   </div>
   <div class="font-mono">

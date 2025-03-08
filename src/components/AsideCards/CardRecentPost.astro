@@ -7,7 +7,7 @@ import posts from '@/content/posts'
 <CardBase title="最新文章" iconName="mdi:history">
   <ChevronBtn left href="/" slot="extra"/>
 
-  <ul class="text-sm lh-relaxed pl-2">
+  <ul class="lh-relaxed pl-2">
     {posts.slice(0,5).map(post=>(
       <li class="py1">
         <a class="block" href={`/posts/${post.id}/`}>{post.data.title}</a>

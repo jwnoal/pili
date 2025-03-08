@@ -71,11 +71,11 @@ const NAV_ITEMS = [
     text: "我的",
     href: "/about",
     children: [
-      {
-        icon: "mdi:account",
-        text: "关于我",
-        href: "/about"
-      }
+      // {
+      //   icon: "mdi:account",
+      //   text: "关于我",
+      //   href: "/about"
+      // }
     ]
   }
 ]

@@ -21,8 +21,8 @@ export const lightTheme = {
 
 export const darkTheme = {
   colors: {
-    global: '#191919',
-    normal: '#1e1e1f',
+    global: '#0e0c12',
+    normal: '#1e1b23',
     textPrim: '#c9c9d7',
     textDesc: '#777777',
     linePrim: '#404040',
