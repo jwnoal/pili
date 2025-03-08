@@ -2,6 +2,7 @@
 import '@/styles/global.scss'
 import HeadFragment from '@/components/fragment/HeadFragment.astro'
 import FooterFragment from '@/components/fragment/FooterFragment.astro'
+import PostComments from "@/components/PostComments.astro"
 import If from '@/components/atomic/If.astro'
 import NavBar from '@/components/NavBar.astro'
 import { SITE_INFO } from '@/config'
@@ -78,6 +79,7 @@ const {
       </div>
       <div class="wfull lg:max-w71% animate-move-up" data-pagefind-body>
         <slot/>
+        <PostComments />
       </div>
     </If>
   </main>
