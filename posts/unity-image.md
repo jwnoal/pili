@@ -1,6 +1,6 @@
 ---
 title: 'Unity 图片'
-titleColor: '#e091e7,#df1cf1'
+titleColor: '#aaa,#0acee9'
 titleIcon: 'asset:unity'
 tags: [ 'Untiy' ]
 categories: [ 'Code' ]
