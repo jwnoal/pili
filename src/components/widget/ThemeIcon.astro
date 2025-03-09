@@ -3,10 +3,10 @@ import { Icon } from "astro-icon/components"
 interface Props { class?: string }
 ---
 
-<a class="theme-icon pos-relative w1em h1em" class:list={Astro.props.class}>
+<div class="theme-icon pos-relative w1em h1em" class:list={Astro.props.class}>
   <Icon class="light" name="mdi:white-balance-sunny"/>
   <Icon class="dark" name="mdi:weather-night"/>
-</a>
+</div>
 
 <style is:global>
   .theme-icon [data-icon] { position: absolute ; top: 0; left: 0; opacity: 0; transition: all .5s; }
