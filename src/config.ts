@@ -1,43 +1,70 @@
-const FAVICON = '/favicon.svg'
-const BASE_URL = 'https://pili.run'
+const FAVICON = "/favicon.svg";
+const BASE_URL = "https://pili.run";
 const SITE_INFO = {
-  title: 'Pili 噼里',
-  author: 'Pili 噼里',
-  language: 'zh-CN',
-  description: '噼里的游戏开发成长记录',
+  title: "Pili 噼里",
+  author: "Pili 噼里",
+  language: "zh-CN",
+  description: "噼里的游戏开发成长记录",
   startYear: 2025,
   endYear: new Date().getFullYear(),
-  email: '781910469@qq.com',
-  baseUrl: BASE_URL + '/',
-  avatarUrl: BASE_URL + '/favicon.svg',
-  siteshotUrl: BASE_URL + '/siteshot.png',
-}
-const POST_PGAE_SIZE = 5
+  email: "781910469@qq.com",
+  baseUrl: BASE_URL + "/",
+  avatarUrl: BASE_URL + "/favicon.svg",
+  siteshotUrl: BASE_URL + "/siteshot.png",
+};
+const POST_PGAE_SIZE = 5;
 const DEFAULT_FRONTMATTER = {
-  titleIcon: 'asset:feather,#4c4948|asset:feather,#c9c9d7',
-  titleColor: '#4c4948|#c9c9d7',
-  description: '暂无描述.',
-  categories: ['未分类'],
+  titleIcon: "asset:feather,#4c4948|asset:feather,#c9c9d7",
+  titleColor: "#4c4948|#c9c9d7",
+  description: "暂无描述.",
+  categories: ["未分类"],
   encrypt: {
-    description: '这是一篇被加密的文章哟',
-    placeholder: '输入密码'
-  }
-}
+    description: "这是一篇被加密的文章哟",
+    placeholder: "输入密码",
+  },
+};
 const SIDEBAR_SETTINGS = {
   name: "Pili 噼里",
-  avatar: '/favicon.svg',
-}
+  avatar: "/favicon.svg",
+};
 const ASIDE_CARDS = {
   info: {
     name: "Pili 噼里",
-    link: '/',
-    avatar: '/favicon.svg',
+    link: "/",
+    avatar: "/favicon.svg",
     descriptionLines: [
       "片刻之欢愉，不如须臾之宁静。",
-      "12",
-    ]
-  }
-}
+      "都是风景，幸会。",
+      "什么是人，欲望满身.",
+      "山行野宿，孤身万里.",
+      "没有期待的日子反而顺顺利利。",
+      "吹不出褶的平静日子也在闪光。",
+      "清醒，自律，知进退，明得失。",
+      "就活这一次，下次不来了。",
+      "白天有说有笑，晚上睡个好觉。",
+      "请成为厉害的大人和更可爱的小孩。",
+      "想开一家早餐店，名字就叫早点见面。",
+      "老人说遇见是福，不遇见也是。",
+      "不回答也是答案，冷处理也是处理。",
+      "什么都明白的人最温柔也最冷漠。",
+      "逃跑吧，跑出这满是世俗的生活。",
+      "留下虚度光阴的一些证据。",
+      "把自己流放到世界上的某个角落。",
+      "风吹又日晒，自由又自在。",
+      "生活，一半家长里短，一半山川湖海。",
+      "迷失在地图上一块风和日丽的地方。",
+      "你只管出发，旅途自有风景。",
+      "一定要爱着点什么，恰似春木对光阴的追求。",
+      "一定要站在你所热爱的生活里闪闪发光。",
+      "别慌，月亮也正在大海某处迷茫。",
+      "凡是过往，皆为序章。",
+      "我们终将上岸，阳光万里。",
+      "有时候生活给你苦难，其实是在铺垫浪漫。",
+      "风雨里做个大人，阳光下做个孩子。",
+      "我与神明取得联络，要甜必须苦过。",
+    ],
+  },
+};
 const NAV_ITEMS = [
   {
     icon: "mdi:post-outline",
@@ -52,19 +79,19 @@ const NAV_ITEMS = [
       {
         icon: "mdi:folder-open",
         text: "分类",
-        href: "/categories"
+        href: "/categories",
       },
       {
         icon: "mdi:tag-multiple",
         text: "标签",
-        href: "/tags"
+        href: "/tags",
       },
-    ]
+    ],
   },
   {
     icon: "mdi:account-multiple",
     text: "友链",
-    href: "/links"
+    href: "/links",
   },
   {
     icon: "mdi:account-box",
@@ -76,9 +103,9 @@ const NAV_ITEMS = [
       //   text: "关于我",
       //   href: "/about"
       // }
-    ]
-  }
-]
+    ],
+  },
+];
 
 const FOOTER = {
   badgeGroups: [
@@ -106,40 +133,49 @@ const FOOTER = {
     // ],
     [
       {
-        label: '',
-        message: 'RSS',
-        labelColor: '#555',
-        color: '#555',
+        label: "",
+        message: "RSS",
+        labelColor: "#555",
+        color: "#555",
         logoBase64: `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' color='white' width='1em' height='1em' viewBox='0 0 24 24'%3E%3Cpath fill='currentColor' d='M19.199 24C19.199 13.467 10.533 4.8 0 4.8V0c13.165 0 24 10.835 24 24zM3.291 17.415a3.3 3.3 0 0 1 3.293 3.295A3.303 3.303 0 0 1 3.283 24C1.47 24 0 22.526 0 20.71s1.475-3.294 3.291-3.295M15.909 24h-4.665c0-6.169-5.075-11.245-11.244-11.245V8.09c8.727 0 15.909 7.184 15.909 15.91'/%3E%3C/svg%3E`,
-        links: ['/rss.xml'],
-        style: 'flat-square',
-        idSuffix: '-badge-rss'
+        links: ["/rss.xml"],
+        style: "flat-square",
+        idSuffix: "-badge-rss",
       },
       {
-        label: '',
-        message: 'ATOM',
-        labelColor: '#555',
-        color: '#555',
+        label: "",
+        message: "ATOM",
+        labelColor: "#555",
+        color: "#555",
         logoBase64: `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' color='white' width='1em' height='1em' viewBox='0 0 24 24'%3E%3Cpath fill='currentColor' d='M19.199 24C19.199 13.467 10.533 4.8 0 4.8V0c13.165 0 24 10.835 24 24zM3.291 17.415a3.3 3.3 0 0 1 3.293 3.295A3.303 3.303 0 0 1 3.283 24C1.47 24 0 22.526 0 20.71s1.475-3.294 3.291-3.295M15.909 24h-4.665c0-6.169-5.075-11.245-11.244-11.245V8.09c8.727 0 15.909 7.184 15.909 15.91'/%3E%3C/svg%3E`,
-        links: ['/atom.xml'],
-        style: 'flat-square',
-        idSuffix: '-badge-atom'
+        links: ["/atom.xml"],
+        style: "flat-square",
+        idSuffix: "-badge-atom",
       },
-    ]
-  ] satisfies Format[][]
-}
+    ],
+  ] satisfies Format[][],
+};
 
 export const FRIEND_LINK = {
   info: SITE_INFO,
   groups: friend_link_groups,
-  siteshotPrefix: 'https://image.thum.io/get/width/400/crop/800/'
-}
+  siteshotPrefix: "https://image.thum.io/get/width/400/crop/800/",
+};
 
 //======================================
-;
-import packageJson from '../package.json'
-import type { Format } from 'badge-maker'
-import friend_link_groups from './config.links'
-import moment from 'moment'
-moment.locale(SITE_INFO.language)
-export { FAVICON, BASE_URL, SITE_INFO, POST_PGAE_SIZE, DEFAULT_FRONTMATTER, NAV_ITEMS, FOOTER, ASIDE_CARDS, SIDEBAR_SETTINGS }
+import packageJson from "../package.json";
+import type { Format } from "badge-maker";
+import friend_link_groups from "./config.links";
+import moment from "moment";
+moment.locale(SITE_INFO.language);
+export {
+  FAVICON,
+  BASE_URL,
+  SITE_INFO,
+  POST_PGAE_SIZE,
+  DEFAULT_FRONTMATTER,
+  NAV_ITEMS,
+  FOOTER,
+  ASIDE_CARDS,
+  SIDEBAR_SETTINGS,
+};
