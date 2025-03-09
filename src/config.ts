@@ -1,5 +1,5 @@
 const FAVICON = '/favicon.svg'
-const BASE_URL = 'https://antares.coderxi.com'
+const BASE_URL = 'https://pili.run'
 const SITE_INFO = {
   title: 'Pili 噼里',
   author: 'Pili 噼里',

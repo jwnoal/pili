@@ -21,12 +21,12 @@ const postsByYear = sort(posts).reduce((_, post) => {
   <div id={year} class="text-xl mb-5">{year}</div>
   <div class="">{postsByYear[year].map(post=>(
 
-    <div class="mb-8">
-       <div class="flex items-center mb-2 text-0.8rem">
-         <Icon name="mdi:calendar-month"/>
+    <div class="mb-4 w-full flex items-center justify-between">
+       <a class="hover:c-#0ed2f7 font-bold" href={`/posts/${post.id}`} title={post.data.title}>{post.data.title}</a>
+       <div class="flex items-center text-0.8rem">
+         <Icon class="mr-2px mt--1px" name="mdi:calendar-month"/>
          <time datetime={post.data.publishDateISOString}>{post.data.publishDateFormatString}</time>
        </div>
-       <a href={`/posts/${post.id}`} title={post.data.title}>{post.data.title}</a>
     </div>
 
   ))}</div>
