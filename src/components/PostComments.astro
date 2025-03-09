@@ -1,22 +1,59 @@
 ---
-
+// 修复重点：必须通过客户端动态加载 + 主题切换事件监听
 ---
 
 <section class="giscus mx-auto mt-10 w-full"></section>
 
-<script
-  src="https://giscus.app/client.js"
-  data-repo="jwnoal/pili"
-  data-repo-id="R_kgDOOFDYsw"
-  data-category="Blog Post Comments"
-  data-category-id="DIC_kwDOOFDYs84CntBP"
-  data-mapping="url"
-  data-strict="0"
-  data-reactions-enabled="1"
-  data-emit-metadata="0"
-  data-input-position="top"
-  data-theme="light"
-  data-lang="zh-CN"
-  data-loading="lazy"
-  crossorigin="anonymous"
-  async></script>
+<script>
+// 修复点 1：动态创建 script 元素以保证客户端运行
+function loadGiscus(theme:string) {
+  const script = document.createElement('script');
+  script.src = 'https://giscus.app/client.js';
+  script.async = true;
+  script.crossOrigin = 'anonymous';
+  
+  // 动态设置配置参数
+  script.setAttribute('data-repo', 'jwnoal/pili');
+  script.setAttribute('data-repo-id', 'R_kgDOOFDYsw');
+  script.setAttribute('data-category', 'Blog Post Comments');
+  script.setAttribute('data-category-id', 'DIC_kwDOOFDYs84CntBP');
+  script.setAttribute('data-mapping', 'url');
+  script.setAttribute('data-strict', '0');
+  script.setAttribute('data-reactions-enabled', '1');
+  script.setAttribute('data-emit-metadata', '0');
+  script.setAttribute('data-input-position', 'top');
+  script.setAttribute('data-lang', 'zh-CN');
+  script.setAttribute('data-loading', 'lazy');
+  
+  // 动态设置主题（关键修复）
+  script.setAttribute('data-theme', theme);
+
+  document.querySelector('.giscus')?.appendChild(script);
+}
+
+// 修复点 2：初始化加载时获取主题
+const initialTheme = localStorage.getItem('theme') === 'dark' ? 'dark' : 'light';
+loadGiscus(initialTheme);
+
+// 修复点 3：监听主题切换事件
+window.addEventListener('theme', (e:any) => {
+  const initialTheme = localStorage.getItem('theme') === 'dark' ? 'dark' : 'light';
+  
+  
+  // 移除旧脚本
+  const oldScript = document.querySelector('.giscus script');
+  if (oldScript) oldScript.remove();
+  
+  // 重新加载新主题的Giscus
+  loadGiscus(initialTheme);
+  
+  // 修复点 4：处理已加载的iframe（关键）
+  const iframe = document.querySelector('iframe.giscus-frame');
+  if (iframe) {
+    (iframe as any).contentWindow.postMessage(
+      { giscus: { setConfig: { theme: initialTheme } } },
+      'https://giscus.app'
+    );
+  }
+});
+</script>
