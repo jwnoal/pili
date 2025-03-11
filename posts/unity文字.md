@@ -22,4 +22,4 @@ description: 'Unity 文字组件的使用'
 
 #### 表情乱码
 将SEGUIEMJ ttf字体文件拖入 Unity 编辑器中，并生成SDF文件  
-在MSYH SDF中设置Fallback List, 添加SEGUIEMJ SDF
+在MSYH SDF中设置Fallback List, 添加SEGUIEMJ SDF。
