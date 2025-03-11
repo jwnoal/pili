@@ -5,6 +5,7 @@ titleIcon: 'asset:unity'
 tags: [ 'Untiy' ]
 categories: [ 'Code' ]
 description: 'Unity 图片组件的使用'
+publishDate: '2025-03-10'
 ---
 
 #### 默认设置导入图片为 Sprite
