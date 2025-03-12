@@ -54,8 +54,8 @@ for (const type of contexts) {
 if (!gl) {
   console.log("该浏览器不支持WebGL");
 } else {
-  var lost = gl.getExtension("WEBGL_lose_context"); // 使用 var 变量提升
-  lost.loseContext();
+  var lose_context = gl.getExtension("WEBGL_lose_context"); // 使用 var 变量提升
+  lose_context.loseContext();
 }
 ```
 
@@ -76,5 +76,5 @@ canvas.addEventListener(
 
 ```js
 // 必须先使用前面模拟webgl lost方法
-lost.restoreContext();
+lose_context.restoreContext();
 ```
