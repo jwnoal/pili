@@ -5,7 +5,8 @@ titleIcon: "asset:markdown"
 tags: ["webgl"]
 categories: ["Code"]
 description: "判断浏览器是否支持webgl"
-publishDate: "2025-03-10"
+publishDate: '2023-03-12'
+updatedDate: '2023-03-12'
 ---
 
 #### 检测 webgl 是否可用
