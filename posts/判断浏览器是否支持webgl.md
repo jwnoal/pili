@@ -1,15 +1,15 @@
 ---
-title: "判断浏览器是否支持webgl"
+title: "判断浏览器是否支持WebGL"
 titleColor: "#aaa,#0ae9ad"
 titleIcon: "asset:markdown"
-tags: ["webgl"]
+tags: ["浏览器"]
 categories: ["Code"]
-description: "判断浏览器是否支持webgl"
+description: "判断浏览器是否支持WebGL以及模拟WebGL 上下文丢失和恢复"
 publishDate: "2023-03-12"
 updatedDate: "2023-03-12"
 ---
 
-#### 检测 webgl 是否可用
+#### 检测 WebGL 是否可用
 
 ```js
 const canvas = document.getElementById("GameCanvas");
@@ -26,7 +26,7 @@ if (!gl) {
 }
 ```
 
-#### 监听 webgl lost
+#### 监听 WebGL webglcontextlost
 
 ```js
 const canvas = document.getElementById("GameCanvas");
@@ -39,7 +39,7 @@ canvas.addEventListener(
 );
 ```
 
-#### 模拟 webgl lost
+#### 模拟 WebGL lost
 
 ```js
 const canvas = document.getElementById("GameCanvas");
@@ -72,7 +72,7 @@ canvas.addEventListener(
 );
 ```
 
-#### 模拟 webgl restored
+#### 模拟 WebGL restored
 
 ```js
 // 必须先使用前面模拟webgl lost方法
