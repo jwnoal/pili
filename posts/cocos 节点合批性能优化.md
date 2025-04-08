@@ -7,7 +7,7 @@ categories: ["Code"]
 description: "节点树纵向优先改横向优先"
 publishDate: "2023-03-12"
 updatedDate: "2023-03-12"
-password: 'pili'
+password: 'pilipal'
 ---
 
 #### 创建脚本LevelRender.ts并挂载到父节点

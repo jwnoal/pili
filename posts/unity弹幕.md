@@ -7,7 +7,7 @@ categories: [ 'Code' ]
 description: 'Unity 弹幕的实现'
 publishDate: '2023-03-10'
 updatedDate: '2023-03-10'
-password: 'pili'
+password: 'pilipal'
 ---
 
 #### 创建容器和prefab
