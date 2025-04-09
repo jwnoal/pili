@@ -9,8 +9,6 @@ publishDate: '2023-03-13'
 updatedDate: '2023-03-13'
 ---
 
-![](https://cdn.jiangwei.zone/blog/20241008210607.png)
-
 #### 运行 c#程序
 
 ```csharp
