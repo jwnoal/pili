@@ -27,6 +27,9 @@ Window -> Entities -> Entiteies Hierarchy // 显示所有 entity
 #### 创建 EntityScene
 右键 New Sub Scene -> Empty Scene
 
+#### 确定启用Burst
+Jobs -> Burst -> Enable Burst Compilation
+
 #### gpu动画插件
 GPU ECS Animation Baker
 
