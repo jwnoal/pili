@@ -198,8 +198,9 @@ NativeArray<Entity> poolEntities = query.ToEntityArray(Allocator.TempJob); // �
 [UpdateAfter(typeof(AgentSystemGroup))] // 更新在AgentSystemGroup之后
 ```
 
-与常规GameObject交互
+与常规GameObject交互    
 
+ecs调用Mono
 ```csharp
 // 使用SystemBase 和 GameManager可以交互
 using Unity.Entities;
@@ -229,6 +230,29 @@ public partial class CountSystem : SystemBase
     }
 }
 
+```
+
+Mono更改ecs
+```csharp
+using UnityEngine;
+using Unity.Entities;
+using Unity.Collections;
+
+public class SpeedManager : MonoBehaviour
+{
+    public float global_speed;
+
+    void Update()
+    {
+        var entities = World.DefaultGameObjectInjectionWorld.EntityManager.CreateEntityQuery(typeof(Speed)).ToEntityArray(Allocator.Temp);
+        foreach (var entity in entities)
+        {
+            var speed = World.DefaultGameObjectInjectionWorld.EntityManager.GetComponentData<Speed>(entity);
+            speed.value = global_speed;
+            World.DefaultGameObjectInjectionWorld.EntityManager.SetComponentData(entity, speed);
+        }
+    }
+}
 ```
 
 创建实体 
