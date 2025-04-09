@@ -1,5 +1,5 @@
 ---
-title: "cocos 节点合批性能优化"
+title: "Cocos 节点合批性能优化"
 titleColor: "#aaa,#5d3bbf"
 titleIcon: "asset:cocos"
 tags: ["Cocos Creator"]

@@ -1,5 +1,5 @@
 ---
-title: 'c# 学习'
+title: 'C# 学习'
 titleColor: '#aaa,#0ae9ad'
 titleIcon: 'asset:markdown'
 tags: [ 'c#' ]

@@ -1,5 +1,5 @@
 ---
-title: 'unity ECS代码片段'
+title: 'Unity ECS代码片段'
 titleColor: '#aaa,#0acee9'
 titleIcon: 'asset:unity'
 tags: [ 'Untiy' ]

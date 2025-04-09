@@ -1,5 +1,5 @@
 ---
-title: 'c# 队列和双端队列'
+title: 'C# 队列和双端队列'
 titleColor: '#aaa,#0ae9ad'
 titleIcon: 'asset:markdown'
 tags: [ 'c#' ]

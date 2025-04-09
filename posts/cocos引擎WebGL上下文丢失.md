@@ -1,5 +1,5 @@
 ---
-title: "cocos引擎WebGL上下文丢失与恢复处理机制"
+title: "Cocos引擎WebGL上下文丢失与恢复处理机制"
 titleColor: "#aaa,#5d3bbf"
 titleIcon: "asset:cocos"
 tags: ["Cocos Creator"]
