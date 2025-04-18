@@ -8,6 +8,9 @@ description: 'unity ECS代码片段示例'
 publishDate: '2023-03-10'
 updatedDate: '2023-03-10'
 password: 'pilipal'
+encrypt:
+  description: |
+    这是一篇被加密的文章。
 ---
 
 IComponentData 组件数据
