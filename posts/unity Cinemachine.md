@@ -24,6 +24,8 @@ updatedDate: '2023-03-10'
 创建节点Virtual Camera，添加组件 CinemachineVirtualCamera, Cinemachine Confiner 2D
 ![](https://cdn.jiangwei.zone/blog/20250418103733789.png)
 
+注意： Body 设置成 Transposer
+
 #### CinemachineVirtualCamera 中的 Follow 绑定跟随的目标物体，Look At 绑定相机的方向。   
 
 创建节点Virtual Camera Follow
