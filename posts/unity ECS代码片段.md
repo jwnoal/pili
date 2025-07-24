@@ -21,6 +21,7 @@ public struct Config : IComponentData
     public Entity Prefab;
     public int Count;
 }
+
 public struct Solider : IComponentData, IEnableableComponent{}
 
 public struct DamageBufferElement : IBufferElementData
@@ -159,7 +160,7 @@ public partial class SpawnSystem : SystemBase
     {
        Entities
             .ForEach(
-                (Entity entity, in LocalTransform transform) =>
+                (Entity entity, in LocalTransform transform, GameObjectGO gameObjectGO) =>
                 {
                     battlefieldCenter += transform.Position.x;
                 }
@@ -230,6 +231,7 @@ public partial struct MoveSystem : ISystem
         {
             // 将ComponentLookup标记为只读
             TransformLookup = state.GetComponentLookup<LocalTransform>(true);
+            // TransformLookup = GetComponentLookup<LocalTransform>(this); // SystemBase
         }
         [BurstCompile]
         public void OnUpdate(ref SystemState state)
@@ -243,8 +245,29 @@ public partial struct MoveSystem : ISystem
             )
             {
             }
+
+            // 立即更改值，不使用ecb
+            // AttackTagLookup 不能ReadOnly
+            if (
+                AttackTagLookup.TryGetComponent(
+                    entity,
+                    out AttackTag attackTag
+                )
+            )
+            {
+                attackTag.Value += 1;
+                AttackTagLookup[entity] = attackTag;
+            }
         }
 }
+```
+
+获取实体集合
+
+```csharp
+var spinningCubesQuery = SystemAPI.QueryBuilder().WithAll<RotationSpeed>().Build();
+spinningCubesQuery.CalculateEntityCount() // 计算实体数量
+NativeArray<Entity> poolEntities = query.ToEntityArray(Allocator.TempJob); // 获取实体集合
 ```
 
 设置组件值
@@ -257,20 +280,27 @@ state.EntityManager.SetComponentData(entity, Soldier);
 // SetComponentEnabled
 ```
 
-获取实体集合
-
-```csharp
-var spinningCubesQuery = SystemAPI.QueryBuilder().WithAll<RotationSpeed>().Build();
-spinningCubesQuery.CalculateEntityCount() // 计算实体数量
-NativeArray<Entity> poolEntities = query.ToEntityArray(Allocator.TempJob); // 获取实体集合
-```
-
 ECB
 
 ```csharp
 // ISystem
 var EcbSingleton = GetSingleton<EndInitializationEntityCommandBufferSystem.Singleton>();
-EcbSingleton.CreateCommandBuffer(state.WorldUnmanaged); // .AsParallelWriter()
+var Ecb = EcbSingleton.CreateCommandBuffer(state.WorldUnmanaged); // .AsParallelWriter()
+
+Ecb.AddComponent(
+    index,
+    entity,
+    new SoldierAttacking
+    {
+        TargetEntity = soldierEnemy.Enemy,
+    }
+);
+
+if (AttackTagNumLookup.TryGetComponent(entity, out AttackTagNum _attackTagNum))
+{
+    _attackTagNum.Value = action.AttackTagNum;
+    Ecb.SetComponent(index, entity, _attackTagNum);
+}
 ```
 
 ```csharp
@@ -284,7 +314,9 @@ public partial class AnimationManagedSystem : SystemBase
     }
     protected override void OnUpdate()
     {
-        EntityCommandBuffer Ecb = EcbSystem.CreateCommandBuffer();
+        EntityCommandBuffer Ecb = EcbSystem.CreateCommandBuffer(); // 不需要手动关闭
+
+        // EntityCommandBuffer Ecb = new EntityCommandBuffer(Allocator.TempJob); // 需要手动关闭 Ecb.Dispose()
     }
 }
 ```
@@ -346,12 +378,24 @@ public class SpeedManager : MonoBehaviour
 
     void Update()
     {
-        var entities = World.DefaultGameObjectInjectionWorld.EntityManager.CreateEntityQuery(typeof(Speed)).ToEntityArray(Allocator.Temp);
+        var Manager = World.DefaultGameObjectInjectionWorld.EntityManager;
+        var entities = Manager.CreateEntityQuery(typeof(Speed)).ToEntityArray(Allocator.Temp);
         foreach (var entity in entities)
         {
-            var speed = World.DefaultGameObjectInjectionWorld.EntityManager.GetComponentData<Speed>(entity);
+            var speed = Manager.GetComponentData<Speed>(entity);
             speed.value = global_speed;
-            World.DefaultGameObjectInjectionWorld.EntityManager.SetComponentData(entity, speed);
+            Manager.SetComponentData(entity, speed);
+        }
+        entities.Dispose();
+
+        using (
+            var query = new EntityQueryBuilder(Allocator.Temp).WithAll<Config>().Build(Manager)
+        )
+        {
+            if (query.IsEmpty)
+                throw new System.Exception("Missing Config entity");
+
+            var config = query.GetSingleton<Config>();
         }
     }
 }
@@ -425,12 +469,13 @@ namespace Demo2
 DynamicBuffer
 
 ```csharp
-ecb.AddBuffer<DamageBufferElement>(entity);
+AddBuffer<DamageBufferElement>(entity); // Authoring
 
-// ecb.SetBuffer<DamageBufferElement>(entity, new NativeArray<DamageBufferElement>(new DamageBufferElement[10], Allocator.Temp);
+// Ecb.SetBuffer<DamageBufferElement>(entity, new NativeArray<DamageBufferElement>(new DamageBufferElement[10], Allocator.Temp);
+
 Ecb.AppendToBuffer(
     index,
-    soldierEnemy.Enemy,
+    ConfigEntity,
     new DamageBufferElement
     {
         Damage = soldier.Attack,
@@ -442,6 +487,28 @@ Ecb.AppendToBuffer(
 
 // damageBuffer.Clear();
 // damageBuffer.Add(dmg);
+
+protected override void OnUpdate()
+{
+    // 等待句柄完成
+    Dependency.Complete();
+
+    var AttackTagBufferElement = SystemAPI.GetSingletonBuffer<AttackTagBufferElement>();
+    foreach (var delta in AttackTagBufferElement)
+    {
+        if (
+            AttackTagNum2Lookup.TryGetComponent(
+                delta.Target,
+                out AttackTagNum2 attackTagNum2
+            )
+        )
+        {
+            attackTagNum2.Value += delta.Value;
+            AttackTagNum2Lookup[delta.Target] = attackTagNum2;
+        }
+    }
+    AttackTagBufferElement.Clear();
+}
 ```
 
 Input.GetKeyDown 不能使用 burst 编译，所以不能用[BurstCompile]注解。
@@ -619,17 +686,18 @@ namespace Demo4
 IJobEntity
 
 ```csharp
-var ecb = GetSingleton<EndInitializationEntityCommandBufferSystem.Singleton>();
+var EcbSingleton = GetSingleton<EndInitializationEntityCommandBufferSystem.Singleton>();
 new MoveJob
 {
     DeltaTime = SystemAPI.Time.DeltaTime,
     TransformLookup = TransformLookup,
-    Ecb = ecb.CreateCommandBuffer(state.WorldUnmanaged).AsParallelWriter(),
+    Ecb = EcbSingleton.CreateCommandBuffer(state.WorldUnmanaged).AsParallelWriter(),
 }.ScheduleParallel();
 
 [BurstCompile]
 [WithAll(typeof(Soldier))]
 [WithNone(typeof(SoldierDead))]
+[UpdateAfter(typeof(MoveSystem))]
 partial struct MoveJob : IJobEntity
 {
     [ReadOnly]

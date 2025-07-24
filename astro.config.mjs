@@ -8,6 +8,8 @@ import expressiveCode from "astro-expressive-code";
 import { BASE_URL } from "./src/config";
 import { remarkPlugins, rehypePlugins } from "./plugins";
 
+import robotsTxt from "astro-robots-txt";
+
 // https://astro.build/config
 export default defineConfig({
   site: BASE_URL,
@@ -23,6 +25,7 @@ export default defineConfig({
     unocss({ injectReset: true, configFile: "/uno.config.ts" }),
     icon(),
     pagefind(),
+    robotsTxt(),
   ],
   markdown: {
     remarkPlugins,
