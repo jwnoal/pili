@@ -1,13 +1,13 @@
 ---
-title: 'Unity ECS代码片段'
-titleColor: '#aaa,#0acee9'
-titleIcon: 'asset:unity'
-tags: [ 'Untiy' ]
-categories: [ 'Code' ]
-description: 'unity ECS代码片段示例'
-publishDate: '2023-03-10'
-updatedDate: '2023-03-10'
-password: 'pilipal'
+title: "Unity ECS代码片段"
+titleColor: "#aaa,#0acee9"
+titleIcon: "asset:unity"
+tags: ["Untiy"]
+categories: ["Code"]
+description: "unity ECS代码片段示例"
+publishDate: "2023-03-10"
+updatedDate: "2023-03-10"
+password: "123123"
 encrypt:
   description: |
     这是一篇被加密的文章。
@@ -21,11 +21,26 @@ public struct Config : IComponentData
     public Entity Prefab;
     public int Count;
 }
-public struct Solider : IComponentData, IEnableableComponent
+public struct Solider : IComponentData, IEnableableComponent{}
+
+public struct DamageBufferElement : IBufferElementData
 {
+    public float Damage;
+    public float Delay;
 }
 
-// WitdDisabled<>
+public class GameObjectGO : IComponentData
+{
+    public GameObject Value;
+
+    public GameObjectGO(GameObject value)
+    {
+        Value = value;
+    }
+
+    // Every IComponentData class must have a no-arg constructor.
+    public GameObjectGO() { }
+}
 ```
 
 Authoring
@@ -102,6 +117,8 @@ public partial class SpawnSystem : SystemBase
 
 遍历
 
+ISystem
+
 ```csharp
 using Unity.Burst;
 using Unity.Entities;
@@ -123,6 +140,33 @@ public partial struct SpawnSystem : ISystem
             transform.ValueRW = transform.ValueRO.RotateY(
                 speed.ValueRO.RadiansPerSecond * deltaTime);
         }
+    }
+}
+```
+
+SystemBase
+
+```csharp
+using Unity.Entities;
+public partial class SpawnSystem : SystemBase
+{
+    protected override void OnCreate()
+    {
+        RequireForUpdate<Config>();
+    }
+
+    protected override void OnUpdate()
+    {
+       Entities
+            .ForEach(
+                (Entity entity, in LocalTransform transform) =>
+                {
+                    battlefieldCenter += transform.Position.x;
+                }
+            )
+            .WithAll<SoldierAttacking>()
+            .WithoutBurst()
+            .Run();
     }
 }
 ```
@@ -174,6 +218,35 @@ readonly partial struct VerticalMovementAspect : IAspect
 if (state.EntityManager.HasComponent<RedSoldier>(entity))
 ```
 
+获取特定 entity 中的组件
+
+```csharp
+public partial struct MoveSystem : ISystem
+{
+    [ReadOnly]
+    public ComponentLookup<LocalTransform> TransformLookup;
+    [BurstCompile]
+        public void OnCreate(ref SystemState state)
+        {
+            // 将ComponentLookup标记为只读
+            TransformLookup = state.GetComponentLookup<LocalTransform>(true);
+        }
+        [BurstCompile]
+        public void OnUpdate(ref SystemState state)
+        {
+            TransformLookup.Update(ref state);
+             if (
+                !TransformLookup.TryGetComponent(
+                    soldierEnemy.Enemy,
+                    out LocalTransform localTransform
+                )
+            )
+            {
+            }
+        }
+}
+```
+
 设置组件值
 
 ```csharp
@@ -192,6 +265,30 @@ spinningCubesQuery.CalculateEntityCount() // 计算实体数量
 NativeArray<Entity> poolEntities = query.ToEntityArray(Allocator.TempJob); // 获取实体集合
 ```
 
+ECB
+
+```csharp
+// ISystem
+var EcbSingleton = GetSingleton<EndInitializationEntityCommandBufferSystem.Singleton>();
+EcbSingleton.CreateCommandBuffer(state.WorldUnmanaged); // .AsParallelWriter()
+```
+
+```csharp
+// SystemBase
+public partial class AnimationManagedSystem : SystemBase
+{
+    private EndSimulationEntityCommandBufferSystem EcbSystem;
+    protected override void OnCreate()
+    {
+        EcbSystem = World.GetOrCreateSystemManaged<EndSimulationEntityCommandBufferSystem>();
+    }
+    protected override void OnUpdate()
+    {
+        EntityCommandBuffer Ecb = EcbSystem.CreateCommandBuffer();
+    }
+}
+```
+
 注解
 
 ```csharp
@@ -201,9 +298,10 @@ NativeArray<Entity> poolEntities = query.ToEntityArray(Allocator.TempJob); // �
 [UpdateAfter(typeof(AgentSystemGroup))] // 更新在AgentSystemGroup之后
 ```
 
-与常规GameObject交互    
+与常规 GameObject 交互
 
-ecs调用Mono
+ecs 调用 Mono
+
 ```csharp
 // 使用SystemBase 和 GameManager可以交互
 using Unity.Entities;
@@ -235,7 +333,8 @@ public partial class CountSystem : SystemBase
 
 ```
 
-Mono更改ecs
+Mono 更改 ecs
+
 ```csharp
 using UnityEngine;
 using Unity.Entities;
@@ -258,7 +357,19 @@ public class SpeedManager : MonoBehaviour
 }
 ```
 
-创建实体 
+Mono Ecs 互相绑定
+
+```csharp
+// 将 GameObject 绑定到 ECS
+manager.AddComponentData(entity, new GameObjectGO(gameObject));
+// go.Value.GetComponent<SeniorSoldier>();
+
+// 从 ECS 绑定到 GameObject
+var go = GameObject.Instantiate(prefab);
+SeniorSoldier seniorSoldierData = go.GetComponent<SeniorSoldier>();
+```
+
+创建实体
 
 ```csharp
 using Unity.Burst;
@@ -286,11 +397,6 @@ namespace Demo2
             {
                 SpawnSoldiers(ref state, SystemAPI.GetSingleton<Spawner>().RedSoldierPrefab, 22f, -20f);
             }
-
-            if (Input.GetKeyDown(KeyCode.W))
-            {
-                SpawnSoldiers(ref state, SystemAPI.GetSingleton<Spawner>().BlueSoldierPrefab, -22f, 20f);
-            }
         }
 
         [BurstCompile]
@@ -314,6 +420,28 @@ namespace Demo2
         }
     }
 }
+```
+
+DynamicBuffer
+
+```csharp
+ecb.AddBuffer<DamageBufferElement>(entity);
+
+// ecb.SetBuffer<DamageBufferElement>(entity, new NativeArray<DamageBufferElement>(new DamageBufferElement[10], Allocator.Temp);
+Ecb.AppendToBuffer(
+    index,
+    soldierEnemy.Enemy,
+    new DamageBufferElement
+    {
+        Damage = soldier.Attack,
+        Delay = delay,
+        AttackUid = soldier.Uid,
+        Type = target.Type,
+    }
+);
+
+// damageBuffer.Clear();
+// damageBuffer.Add(dmg);
 ```
 
 Input.GetKeyDown 不能使用 burst 编译，所以不能用[BurstCompile]注解。

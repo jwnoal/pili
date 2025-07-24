@@ -3,18 +3,18 @@
   "type": "module",
   "version": "1.0.3",
   "scripts": {
-    "dev": "astro dev",
+    "dev": "astro dev --host",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro"
   },
   "dependencies": {
-    "@astrojs/markdown-remark": "^6.3.1",
-    "@astrojs/mdx": "^4.2.4",
-    "@astrojs/rss": "^4.0.11",
-    "@astrojs/sitemap": "^3.3.0",
-    "astro": "^5.7.3",
-    "astro-pagefind": "^1.7.0",
+    "@astrojs/markdown-remark": "^6.3.3",
+    "@astrojs/mdx": "^4.3.1",
+    "@astrojs/rss": "^4.0.12",
+    "@astrojs/sitemap": "^3.4.1",
+    "astro": "^5.12.3",
+    "astro-pagefind": "^1.8.3",
     "crypto-js": "^4.2.0",
     "typed.js": "^2.1.0"
   },
@@ -47,6 +47,11 @@
   "pnpm": {
     "overrides": {
       "esbuild": "0.24.0"
-    }
+    },
+    "ignoredBuiltDependencies": [
+      "@parcel/watcher",
+      "esbuild",
+      "sharp"
+    ]
   }
 }

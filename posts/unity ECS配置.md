@@ -7,7 +7,7 @@ categories: [ 'Code' ]
 description: 'Unity ECS下载及配置'
 publishDate: '2023-03-10'
 updatedDate: '2023-03-10'
-password: 'pilipal'
+password: '123123'
 ---
 
 #### 安装Entity

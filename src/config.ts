@@ -5,14 +5,14 @@ const SITE_INFO = {
   author: "Pili 噼里",
   language: "zh-CN",
   description: "噼里的游戏开发成长记录",
-  startYear: 2025,
+  startYear: 2023,
   endYear: new Date().getFullYear(),
   email: "781910469@qq.com",
   baseUrl: BASE_URL + "/",
   avatarUrl: BASE_URL + "/favicon.svg",
   siteshotUrl: BASE_URL + "/siteshot.png",
 };
-const POST_PGAE_SIZE = 5;
+const POST_PGAE_SIZE = 10;
 const DEFAULT_FRONTMATTER = {
   titleIcon: "asset:feather,#4c4948|asset:feather,#c9c9d7",
   titleColor: "#4c4948|#c9c9d7",
