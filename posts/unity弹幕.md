@@ -1,21 +1,24 @@
 ---
-title: 'Unity 弹幕'
-titleColor: '#aaa,#0ae9ad'
-titleIcon: 'asset:unity'
-tags: [ 'Untiy' ]
-categories: [ 'Code' ]
-description: 'Unity 弹幕的实现'
-publishDate: '2023-03-10'
-updatedDate: '2023-03-10'
-password: '123123'
+title: "Unity 弹幕"
+titleColor: "#aaa,#0ae9ad"
+titleIcon: "asset:unity"
+tags: ["Untiy"]
+categories: ["Code"]
+description: "Unity 弹幕的实现"
+publishDate: "2023-03-10"
+updatedDate: "2023-03-10"
+password: "1231234"
 ---
 
-#### 创建容器和prefab
+#### 创建容器和 prefab
+
 ![](https://cdn.jiangwei.zone/blog/20250310165946068.png)
 ![](https://cdn.jiangwei.zone/blog/20250310170204760.png)
 
 #### 创建脚本
+
 Barrage.cs
+
 ```c#
 using System.Collections.Generic;
 using UnityEngine;
@@ -138,6 +141,7 @@ public class BulletScreen
 ```
 
 BarrageItem.cs
+
 ```c#
 
 using TMPro;
@@ -258,6 +262,7 @@ public class BarrageItem : MonoBehaviour
 ```
 
 BarrageManager.cs
+
 ```c#
 using UnityEngine;
 

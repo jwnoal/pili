@@ -7,7 +7,7 @@ categories: ["Code"]
 description: "unity ECS代码片段示例"
 publishDate: "2023-03-10"
 updatedDate: "2023-03-10"
-password: "123123"
+password: "1231234"
 encrypt:
   description: |
     这是一篇被加密的文章。
