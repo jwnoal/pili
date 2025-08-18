@@ -34,9 +34,11 @@ updatedDate: "2023-03-10"
 
 如果展示出的动画有不正常的描边， SkeletonGraphicDefault(Material) Shader 中勾选 Straight Alpha Texture 选项。
 
+**SkeletonGraphic 没有 order in layer，在 ui 中也可以试试 SkeletonAnimation，或许也能显示**
+
 相关代码：
 
-```unity
+```csharp
 using System;
 using DG.Tweening;
 using Spine;

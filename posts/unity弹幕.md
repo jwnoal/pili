@@ -15,6 +15,15 @@ password: "1231234"
 ![](https://cdn.jiangwei.zone/blog/20250310165946068.png)
 ![](https://cdn.jiangwei.zone/blog/20250310170204760.png)
 
+BarrageItem layout:
+![](https://cdn.jiangwei.zone/blog/20250815141859059.png)
+
+name:
+![](https://cdn.jiangwei.zone/blog/20250815142058675.png)
+
+msg:
+![](https://cdn.jiangwei.zone/blog/20250815142135922.png)
+
 #### 创建脚本
 
 Barrage.cs
