@@ -34,3 +34,47 @@ noto_Sans
 
 字体下载网站：
 [https://fonts.google.com/noto/specimen/Noto+Sans?preview.text=H%E2%82%87.%E9%9B%A8%E6%B2%AB#glyphs](https://fonts.google.com/noto/specimen/Noto+Sans?preview.text=H%E2%82%87.%E9%9B%A8%E6%B2%AB#glyphs)
+
+#### 字体图片
+
+使用网站[https://snowb.org/](https://snowb.org/) 将零散图转为图集  
+设置图集为 Multiple 并 Sprite Editor 进行拆分  
+图集右键新建 sprite asset, 在 sprite Character Table 中可以设置图片 Name (按回车确定)  
+使用脚本加载图片文字
+
+```csharp
+public string GetImageString(string str)
+{
+   string[] imageTarget = new string[11]
+   {
+      "-",
+      "0",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+   };
+   char[] astr = str.ToCharArray();
+   string tar = "";
+   for (int i = 0; i < astr.Length; i++)
+   {
+      string idstr = astr[i].ToString();
+      if (!imageTarget.Contains(idstr))
+      {
+            tar += astr[i].ToString();
+            continue;
+      }
+      else
+      {
+            tar += $"<sprite name=\"{idstr}\">";
+      }
+   }
+   return tar;
+}
+
+```
