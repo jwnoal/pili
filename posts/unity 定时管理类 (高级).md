@@ -18,28 +18,37 @@ using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.LowLevel;
 using UnityEngine.PlayerLoop;
+using UnityEngine.Profiling;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 /// <summary>
-/// FlowScheduler - 一个高性能、零GC、统一的协程与异步任务调度器。
+/// FlowScheduler - 高性能、零GC、统一的协程与异步任务调度器
+/// 版本 3.2 - Unity 2022.3兼容版
 /// </summary>
 public static class FlowScheduler
 {
     #region 核心数据结构与配置
 
     private static readonly object _lockObject = new object();
-    private const int INITIAL_POOL_SIZE = 50;
-    private const int MAX_POOL_SIZE = 500;
+    private static int _initialPoolSize = 50;
+    private static int _maxPoolSize = 500;
     private const float AUTO_TRIM_INTERVAL = 30f;
+    private const float POOL_ADJUST_INTERVAL = 10f;
 
-    // 活跃任务数据结构
     private static readonly LinkedList<FlowTask> _activeTasks = new LinkedList<FlowTask>();
-    private static readonly Stack<FlowTask> _taskPool = new Stack<FlowTask>(INITIAL_POOL_SIZE);
+    private static readonly Stack<FlowTask> _taskPool = new Stack<FlowTask>();
     private static readonly Dictionary<int, FlowTask> _taskMap = new Dictionary<int, FlowTask>();
     private static int _nextTaskId = 1;
 
-    // 自定义 PlayerLoop 系统，用于高性能更新
     private static bool _isPlayerLoopInitialized = false;
     private static CoroutineHost _coroutineHost;
+
+    // 性能计数器
+    public static int TotalTasksCreated { get; private set; }
+    public static int TotalTasksCompleted { get; private set; }
+    public static int PeakActiveTasks { get; private set; }
 
     #endregion
 
@@ -47,26 +56,34 @@ public static class FlowScheduler
 
     public enum TaskState
     {
-        Running, // 正在运行
-        Paused, // 已暂停
-        Completed, // 已完成
-        Cancelled, // 已取消
-        Faulted // 因异常而失败
-        ,
+        Running,
+        Paused,
+        Completed,
+        Cancelled,
+        Faulted,
     }
 
     public enum TimeMode
     {
-        Scaled, // 受 Time.timeScale 影响
-        Unscaled // 不受 Time.timeScale 影响
-        ,
+        Scaled,
+        Unscaled,
+    }
+
+    public enum InjectionPoint
+    {
+        AfterUpdate,
+        AfterFixedUpdate,
+        AfterPreLateUpdate,
+        Custom,
     }
 
     public struct TaskConfig
     {
         public TimeMode TimeMode;
         public CancellationToken CancellationToken;
-        public string Name; // 可选：用于调试时给任务命名
+        public string Name;
+        public int Priority;
+        public string ProfilerName;
 
         public static TaskConfig Default =>
             new TaskConfig
@@ -74,17 +91,21 @@ public static class FlowScheduler
                 TimeMode = TimeMode.Scaled,
                 CancellationToken = CancellationToken.None,
                 Name = null,
+                Priority = 0,
+                ProfilerName = null,
             };
     }
 
-    /// <summary>
-    /// 轻量级句柄，用于控制和查询调度任务的状态。
-    /// </summary>
     public struct FlowHandle : IEquatable<FlowHandle>
     {
         public readonly int Id;
+        public readonly int Generation;
 
-        internal FlowHandle(int id) => Id = id;
+        internal FlowHandle(int id, int generation)
+        {
+            Id = id;
+            Generation = generation;
+        }
 
         public bool IsValid
         {
@@ -92,9 +113,9 @@ public static class FlowScheduler
             {
                 lock (_lockObject)
                 {
-                    return Id != 0
-                        && _taskMap.ContainsKey(Id)
-                        && _taskMap[Id].State != TaskState.Completed;
+                    return _taskMap.TryGetValue(Id, out var task)
+                        && task.State != TaskState.Completed
+                        && task.Generation == Generation;
                 }
             }
         }
@@ -105,9 +126,11 @@ public static class FlowScheduler
             {
                 lock (_lockObject)
                 {
-                    return _taskMap.TryGetValue(Id, out var task)
-                        ? task.State
-                        : TaskState.Completed;
+                    if (_taskMap.TryGetValue(Id, out var task) && task.Generation == Generation)
+                    {
+                        return task.State;
+                    }
+                    return TaskState.Completed;
                 }
             }
         }
@@ -118,7 +141,11 @@ public static class FlowScheduler
             {
                 lock (_lockObject)
                 {
-                    return _taskMap.TryGetValue(Id, out var task) ? task.GetElapsedTime() : 0f;
+                    if (_taskMap.TryGetValue(Id, out var task) && task.Generation == Generation)
+                    {
+                        return task.GetElapsedTime();
+                    }
+                    return 0f;
                 }
             }
         }
@@ -129,68 +156,110 @@ public static class FlowScheduler
 
         public void Resume() => FlowScheduler.Resume(this);
 
+        public bool IsAlive => State == TaskState.Running || State == TaskState.Paused;
+
         public override bool Equals(object obj) => obj is FlowHandle other && Equals(other);
 
-        public bool Equals(FlowHandle other) => Id == other.Id;
+        public bool Equals(FlowHandle other) => Id == other.Id && Generation == other.Generation;
 
-        public override int GetHashCode() => Id;
+        public override int GetHashCode() => HashCode.Combine(Id, Generation);
 
         public static bool operator ==(FlowHandle lhs, FlowHandle rhs) => lhs.Equals(rhs);
 
-        public static bool operator !=(FlowHandle lhs, FlowHandle rhs) => !(lhs == rhs);
+        public static bool operator !=(FlowHandle lhs, FlowHandle rhs) => !lhs.Equals(rhs);
     }
 
     #endregion
 
     #region 内部核心任务类
 
-    private class FlowTask
+    private class FlowTask : IComparable<FlowTask>
     {
         public int Id { get; private set; }
+        public int Generation { get; private set; }
         public TaskState State { get; private set; }
         public TaskConfig Config { get; private set; }
-
-        public Action OnComplete { get; set; }
-        public Action OnCancel { get; set; }
-        public Action<Exception> OnError { get; set; }
-        public object Current { get; private set; }
+        public Exception Exception { get; private set; }
+        public float LastUpdateTime { get; private set; }
+        public double StartTime { get; private set; }
 
         private IEnumerator _coroutineRoutine;
         private CancellationTokenSource _taskCts;
-        private float _startTime;
-        private float _pauseTime;
-        private float _totalPausedDuration;
+        private double _pauseTime;
+        private double _totalPausedDuration;
         private Coroutine _currentProxyCoroutine;
+        private bool _isProxyRunning;
 
-        public void Initialize(IEnumerator routine, TaskConfig config)
+        #region 状态控制方法
+        public void MarkRunning() => State = TaskState.Running;
+
+        public void MarkPaused() => State = TaskState.Paused;
+
+        public void MarkCancelled() => State = TaskState.Cancelled;
+
+        public void MarkCompleted() => State = TaskState.Completed;
+
+        public void MarkFaulted() => State = TaskState.Faulted;
+
+        public void SetException(Exception e)
+        {
+            Exception = e;
+            MarkFaulted();
+        }
+        #endregion
+
+        public void Initialize(int id, IEnumerator routine, TaskConfig config)
         {
             ResetInternalState();
-            Id = _nextTaskId++;
+            Id = id;
             Config = config;
             _coroutineRoutine = routine;
             _taskCts = CancellationTokenSource.CreateLinkedTokenSource(config.CancellationToken);
-            State = TaskState.Running;
-            _startTime = GetCurrentTime(Config);
+            MarkRunning();
+            StartTime = GetCurrentTime(Config);
+            LastUpdateTime = (float)StartTime;
         }
 
-        public void Initialize(Func<CancellationToken, Task> asyncFunc, TaskConfig config)
+        public void Initialize(int id, Func<CancellationToken, Task> asyncFunc, TaskConfig config)
         {
             ResetInternalState();
-            Id = _nextTaskId++;
+            Id = id;
             Config = config;
             _taskCts = CancellationTokenSource.CreateLinkedTokenSource(config.CancellationToken);
-            State = TaskState.Running;
-            _startTime = GetCurrentTime(Config);
+            MarkRunning();
+            StartTime = GetCurrentTime(Config);
+            LastUpdateTime = (float)StartTime;
             _coroutineRoutine = RunAsyncWrapper(asyncFunc, _taskCts.Token);
         }
 
-        // 异步任务的包装器，使其能被协程调度器处理
         private IEnumerator RunAsyncWrapper(
             Func<CancellationToken, Task> asyncFunc,
             CancellationToken token
         )
         {
-            var runningTask = asyncFunc.Invoke(token);
+            Task runningTask = null;
+            Exception caughtException = null;
+
+            try
+            {
+                runningTask = asyncFunc.Invoke(token);
+            }
+            catch (Exception e)
+            {
+                caughtException = e;
+            }
+
+            if (caughtException != null)
+            {
+                SetException(caughtException);
+                yield break;
+            }
+
+            if (runningTask == null)
+            {
+                yield break;
+            }
+
             while (!runningTask.IsCompleted)
             {
                 if (token.IsCancellationRequested)
@@ -199,127 +268,157 @@ public static class FlowScheduler
                 }
                 yield return null;
             }
-            if (runningTask.IsFaulted)
+
+            if (runningTask.IsFaulted && runningTask.Exception != null)
             {
-                throw runningTask.Exception.InnerException;
+                SetException(runningTask.Exception);
             }
         }
 
-        // 核心更新方法，由 PlayerLoop 调用
         public bool MoveNext()
         {
+            // 更新最后执行时间
+            LastUpdateTime = (float)GetCurrentTime(Config);
+
+            // 先检查暂停状态 - 保持任务活跃但不执行
+            if (State == TaskState.Paused)
+                return true;
+
+            // 再检查其他终止状态
             if (State != TaskState.Running)
                 return false;
 
-            if (_taskCts.Token.IsCancellationRequested)
+            if (_taskCts != null && _taskCts.Token.IsCancellationRequested)
             {
-                Cancel();
+                MarkCancelled();
                 return false;
             }
 
             try
             {
-                if (_currentProxyCoroutine != null)
+                if (_isProxyRunning)
                 {
-                    // 检查代理协程是否完成
                     return true;
                 }
 
                 if (_coroutineRoutine == null)
                 {
-                    Complete();
+                    MarkCompleted();
                     return false;
                 }
 
                 bool hasNext = _coroutineRoutine.MoveNext();
-                Current = _coroutineRoutine.Current;
 
-                // 根据 yield 返回的类型进行处理
-                if (Current is float floatDelay)
+                if (_isProxyRunning)
                 {
-                    _currentProxyCoroutine = _coroutineHost.StartProxyCoroutine(
-                        WaitForSecondsInternal(floatDelay, Config.TimeMode)
-                    );
+                    return true;
                 }
-                else if (Current is YieldInstruction yi)
+
+                var currentYield = _coroutineRoutine.Current;
+
+                // 使用模式匹配优化类型判断
+                switch (currentYield)
                 {
-                    _currentProxyCoroutine = _coroutineHost.StartProxyCoroutine(yi);
-                }
-                else if (Current is CustomYieldInstruction customYi)
-                {
-                    _currentProxyCoroutine = _coroutineHost.StartProxyCoroutine(customYi);
-                }
-                else if (Current is Coroutine coroutine)
-                {
-                    _currentProxyCoroutine = _coroutineHost.StartProxyCoroutine(coroutine);
-                }
-                else if (Current != null)
-                {
-                    // 未知的 yield 类型，忽略并继续
+                    case float floatDelay:
+                        StartProxyCoroutine(WaitForSecondsInternal(floatDelay, Config.TimeMode));
+                        break;
+                    case Coroutine coroutine:
+                        StartProxyCoroutine(coroutine);
+                        break;
+                    case YieldInstruction yieldInstruction:
+                        StartProxyCoroutine(yieldInstruction);
+                        break;
+                    case CustomYieldInstruction customYield:
+                        StartProxyCoroutine(customYield);
+                        break;
                 }
 
                 if (!hasNext)
                 {
-                    Complete();
+                    MarkCompleted();
                 }
                 return hasNext;
             }
             catch (Exception e)
             {
-                State = TaskState.Faulted;
-                OnError?.Invoke(e);
-                Complete();
+                SetException(e);
+                MarkCompleted();
                 return false;
             }
         }
 
-        // 内部实现的零GC延迟计时器
+        private void StartProxyCoroutine(object instruction)
+        {
+            if (instruction == null)
+                return;
+
+            _isProxyRunning = true;
+            _currentProxyCoroutine = _coroutineHost.StartProxyCoroutine(
+                instruction,
+                () =>
+                {
+                    _isProxyRunning = false;
+                }
+            );
+        }
+
         private IEnumerator WaitForSecondsInternal(float seconds, TimeMode timeMode)
         {
-            float elapsed = 0f;
-            Func<float> deltaTimeFunc =
+            double elapsed = 0f;
+            Func<double> deltaTimeFunc =
                 (timeMode == TimeMode.Unscaled)
                     ? () => Time.unscaledDeltaTime
                     : () => Time.deltaTime;
 
             while (elapsed < seconds)
             {
+                // 处理暂停状态
                 while (State == TaskState.Paused)
                 {
                     yield return null;
                 }
+
+                // 检查是否被取消
+                if (State != TaskState.Running)
+                {
+                    yield break;
+                }
+
                 elapsed += deltaTimeFunc();
                 yield return null;
             }
         }
 
-        // 重置任务状态以便回收
         public void ResetInternalState()
         {
-            Id = 0;
             _coroutineRoutine = null;
-            _taskCts?.Cancel();
-            _taskCts?.Dispose();
-            _taskCts = null;
-            OnComplete = null;
-            OnCancel = null;
-            OnError = null;
-            _coroutineHost.StopProxyCoroutine(_currentProxyCoroutine);
-            _currentProxyCoroutine = null;
+            if (_currentProxyCoroutine != null)
+            {
+                _coroutineHost?.StopProxyCoroutine(_currentProxyCoroutine);
+                _currentProxyCoroutine = null;
+            }
+            _isProxyRunning = false;
             State = TaskState.Completed;
-            _startTime = 0f;
+            StartTime = 0f;
             _pauseTime = 0f;
             _totalPausedDuration = 0f;
+            Generation++;
+            Exception = null;
+            LastUpdateTime = 0f;
+
+            if (_taskCts != null)
+            {
+                _taskCts.Dispose();
+                _taskCts = null;
+            }
         }
 
-        // 暂停、恢复、取消和完成方法
         public void Pause()
         {
             if (State == TaskState.Running)
             {
-                State = TaskState.Paused;
+                MarkPaused();
                 _pauseTime = GetCurrentTime(Config);
-                _coroutineHost.StopProxyCoroutine(_currentProxyCoroutine);
             }
         }
 
@@ -327,12 +426,8 @@ public static class FlowScheduler
         {
             if (State == TaskState.Paused)
             {
-                State = TaskState.Running;
+                MarkRunning();
                 _totalPausedDuration += GetCurrentTime(Config) - _pauseTime;
-                if (_currentProxyCoroutine != null)
-                {
-                    _coroutineHost.StartProxyCoroutine(_currentProxyCoroutine);
-                }
             }
         }
 
@@ -340,43 +435,39 @@ public static class FlowScheduler
         {
             if (State == TaskState.Running || State == TaskState.Paused)
             {
-                State = TaskState.Cancelled;
+                MarkCancelled();
                 _taskCts?.Cancel();
-                OnCancel?.Invoke();
-                _coroutineHost.StopProxyCoroutine(_currentProxyCoroutine);
+                if (_currentProxyCoroutine != null)
+                {
+                    _coroutineHost?.StopProxyCoroutine(_currentProxyCoroutine);
+                }
             }
-        }
-
-        public void Complete()
-        {
-            if (State == TaskState.Running)
-            {
-                State = TaskState.Completed;
-                OnComplete?.Invoke();
-            }
-            _taskCts?.Dispose();
-            _coroutineHost.StopProxyCoroutine(_currentProxyCoroutine);
         }
 
         public float GetElapsedTime()
         {
-            float currentTime = GetCurrentTime(Config);
-            return (State == TaskState.Paused ? _pauseTime : currentTime)
-                - _startTime
-                - _totalPausedDuration;
+            double currentTime = GetCurrentTime(Config);
+            return (float)(
+                (State == TaskState.Paused ? _pauseTime : currentTime)
+                - StartTime
+                - _totalPausedDuration
+            );
         }
 
-        private float GetCurrentTime(TaskConfig config) =>
-            config.TimeMode == TimeMode.Unscaled ? Time.unscaledTime : Time.time;
+        private double GetCurrentTime(TaskConfig config) =>
+            config.TimeMode == TimeMode.Unscaled ? Time.unscaledTimeAsDouble : Time.timeAsDouble;
+
+        // 实现优先级比较
+        public int CompareTo(FlowTask other)
+        {
+            return other.Config.Priority.CompareTo(Config.Priority);
+        }
     }
 
     #endregion
 
     #region 协程宿主 (隐藏的 MonoBehaviour)
 
-    /// <summary>
-    /// 一个隐藏的 MonoBehaviour 单例，用于执行 Unity 的原生 YieldInstruction。
-    /// </summary>
     private class CoroutineHost : MonoBehaviour
     {
         private static CoroutineHost _instance;
@@ -395,72 +486,190 @@ public static class FlowScheduler
             }
         }
 
+        private readonly object _proxyLock = new object();
         private readonly Dictionary<object, Coroutine> _activeProxies =
             new Dictionary<object, Coroutine>();
 
-        public Coroutine StartProxyCoroutine(object instruction)
+        public Coroutine StartProxyCoroutine(object instruction, Action onComplete)
         {
             if (instruction == null)
                 return null;
-            StopProxyCoroutine(instruction); // 确保旧的已停止
-            Coroutine newCoroutine = StartCoroutine(WrapperCoroutine(instruction));
-            _activeProxies[instruction] = newCoroutine;
-            return newCoroutine;
+
+            lock (_proxyLock)
+            {
+                StopProxyCoroutine(instruction);
+                Coroutine newCoroutine = StartCoroutine(WrapperCoroutine(instruction, onComplete));
+                _activeProxies[instruction] = newCoroutine;
+                return newCoroutine;
+            }
         }
 
         public void StopProxyCoroutine(object instruction)
         {
-            if (
-                instruction != null
-                && _activeProxies.TryGetValue(instruction, out Coroutine existingCoroutine)
-            )
+            if (instruction == null)
+                return;
+
+            lock (_proxyLock)
             {
-                StopCoroutine(existingCoroutine);
-                _activeProxies.Remove(instruction);
+                if (_activeProxies.TryGetValue(instruction, out Coroutine existingCoroutine))
+                {
+                    StopCoroutine(existingCoroutine);
+                    _activeProxies.Remove(instruction);
+                }
             }
         }
 
-        private IEnumerator WrapperCoroutine(object instruction)
+        public void StopAllCoroutinesInternal()
+        {
+            lock (_proxyLock)
+            {
+                StopAllCoroutines();
+                _activeProxies.Clear();
+            }
+        }
+
+        private IEnumerator WrapperCoroutine(object instruction, Action onComplete)
         {
             yield return instruction;
-            _activeProxies.Remove(instruction);
+
+            lock (_proxyLock)
+            {
+                _activeProxies.Remove(instruction);
+            }
+
+            onComplete?.Invoke();
+        }
+
+        void OnDestroy()
+        {
+            lock (_proxyLock)
+            {
+                _activeProxies.Clear();
+            }
         }
     }
 
     #endregion
 
-    #region 初始化与 PlayerLoop 集成
+    #region 初始化、清理与 PlayerLoop 集成
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
     private static void Initialize()
     {
+        Cleanup();
+
         lock (_lockObject)
         {
-            // 初始化任务对象池
-            for (int i = 0; i < INITIAL_POOL_SIZE; i++)
+            // 初始化对象池
+            for (int i = 0; i < _initialPoolSize; i++)
             {
                 _taskPool.Push(new FlowTask());
             }
+
             _coroutineHost = CoroutineHost.Instance;
             SetupCustomPlayerLoop();
-            // 启动自动精简协程
-            Start(AutoTrimPoolRoutine(), TaskConfig.Default);
+
+            // 启动管理协程
+            Start(
+                ManagementRoutine(),
+                new TaskConfig
+                {
+                    Name = "FlowScheduler_Management",
+                    Priority = int.MinValue, // 最低优先级
+                }
+            );
+        }
+
+#if UNITY_EDITOR
+        EditorApplication.quitting += OnEditorQuitting;
+#endif
+    }
+
+    private static void Cleanup()
+    {
+        lock (_lockObject)
+        {
+            foreach (var task in _activeTasks)
+            {
+                task.Cancel();
+            }
+            _activeTasks.Clear();
+            _taskMap.Clear();
+            _taskPool.Clear();
+            _nextTaskId = 1;
+            PeakActiveTasks = 0;
+            TotalTasksCreated = 0;
+            TotalTasksCompleted = 0;
+
+            if (_coroutineHost != null)
+            {
+                _coroutineHost.StopAllCoroutinesInternal();
+            }
         }
     }
 
-    // 设置自定义 PlayerLoop，将更新逻辑注入到 Unity 循环中
+#if UNITY_EDITOR
+    private static void OnEditorQuitting()
+    {
+        EditorApplication.quitting -= OnEditorQuitting;
+        Cleanup();
+    }
+#endif
+
+    private static InjectionPoint _injectionPoint = InjectionPoint.AfterPreLateUpdate;
+    private static string _customInjectionPoint;
+
+    public static void ConfigurePlayerLoopInjection(InjectionPoint point, string customPoint = null)
+    {
+        if (_isPlayerLoopInitialized)
+        {
+            Debug.LogWarning(
+                "[FlowScheduler] PlayerLoop already initialized. Changes will take effect on next initialization."
+            );
+        }
+
+        _injectionPoint = point;
+        _customInjectionPoint = customPoint;
+    }
+
     private static void SetupCustomPlayerLoop()
     {
         if (_isPlayerLoopInitialized)
             return;
+
         var currentLoop = PlayerLoop.GetCurrentPlayerLoop();
+        if (currentLoop.subSystemList == null)
+            return;
+
+        // 检查是否已经注入
+        foreach (var system in currentLoop.subSystemList)
+        {
+            if (system.type == typeof(FlowScheduler))
+            {
+                _isPlayerLoopInitialized = true;
+                return;
+            }
+
+            if (system.subSystemList != null)
+            {
+                foreach (var subSystem in system.subSystemList)
+                {
+                    if (subSystem.type == typeof(FlowScheduler))
+                    {
+                        _isPlayerLoopInitialized = true;
+                        return;
+                    }
+                }
+            }
+        }
+
         var timeManagerSystem = new PlayerLoopSystem()
         {
             type = typeof(FlowScheduler),
             updateDelegate = UpdateFlowTasks,
         };
 
-        // 在 Update 阶段插入 FlowScheduler 的更新逻辑
+        // 增强PlayerLoop注入的健壮性
         for (int i = 0; i < currentLoop.subSystemList.Length; i++)
         {
             if (currentLoop.subSystemList[i].type == typeof(Update))
@@ -469,56 +678,164 @@ public static class FlowScheduler
                     currentLoop.subSystemList[i].subSystemList
                 );
 
-                // 找到合适的插入点，兼容不同 Unity 版本
-                int insertIndex = updateSubsystems.FindIndex(s =>
-                    s.type.FullName.Contains("ScriptRunBehaviourLateUpdate")
-                    || s.type.FullName.Contains("UpdateScriptRunBehaviourLateUpdate")
-                );
+                // 增强的注入点选择逻辑
+                int insertIndex = -1;
+                string pointName = null;
+
+                switch (_injectionPoint)
+                {
+                    case InjectionPoint.AfterUpdate:
+                        insertIndex = updateSubsystems.FindIndex(s => s.type == typeof(Update));
+                        pointName = "Update";
+                        break;
+
+                    case InjectionPoint.AfterFixedUpdate:
+                        insertIndex = updateSubsystems.FindIndex(s =>
+                            s.type == typeof(FixedUpdate)
+                        );
+                        pointName = "FixedUpdate";
+                        break;
+
+                    case InjectionPoint.AfterPreLateUpdate:
+                        insertIndex = updateSubsystems.FindIndex(s =>
+                            s.type == typeof(PreLateUpdate)
+                        );
+                        pointName = "PreLateUpdate";
+                        break;
+
+                    case InjectionPoint.Custom:
+                        if (!string.IsNullOrEmpty(_customInjectionPoint))
+                        {
+                            insertIndex = updateSubsystems.FindIndex(s =>
+                                s.type.Name.Contains(_customInjectionPoint)
+                            );
+                            pointName = _customInjectionPoint;
+                        }
+                        break;
+                }
+
+                if (insertIndex == -1)
+                {
+                    // 回退到智能选择
+                    int[] priorityPoints = new[]
+                    {
+                        updateSubsystems.FindIndex(s =>
+                            s.type.Name.Contains("ScriptRunBehaviourLateUpdate")
+                        ),
+                        updateSubsystems.FindIndex(s => s.type == typeof(PreLateUpdate)),
+                        updateSubsystems.FindIndex(s => s.type == typeof(Update)),
+                        updateSubsystems.Count - 1,
+                    };
+
+                    foreach (int index in priorityPoints)
+                    {
+                        if (index >= 0)
+                        {
+                            insertIndex = index;
+                            pointName = updateSubsystems[index].type.Name;
+                            break;
+                        }
+                    }
+                }
 
                 if (insertIndex >= 0)
                 {
-                    updateSubsystems.Insert(insertIndex, timeManagerSystem);
+                    Debug.Log($"[FlowScheduler] Injecting at: {pointName}");
+                    updateSubsystems.Insert(insertIndex + 1, timeManagerSystem);
                 }
                 else
                 {
                     updateSubsystems.Add(timeManagerSystem);
                 }
+
                 currentLoop.subSystemList[i].subSystemList = updateSubsystems.ToArray();
                 break;
             }
         }
+
         PlayerLoop.SetPlayerLoop(currentLoop);
         _isPlayerLoopInitialized = true;
     }
 
-    // 核心任务更新方法，每帧执行一次
     private static void UpdateFlowTasks()
     {
-        lock (_lockObject)
+        Profiler.BeginSample("FlowScheduler.Update");
+
+        try
         {
-            var node = _activeTasks.Last;
-            while (node != null)
+            List<FlowTask> tasksToProcess;
+            lock (_lockObject)
             {
-                var prevNode = node.Previous;
-                var task = node.Value;
-                // 如果任务已完成或取消，则移除并回收
-                if (!task.MoveNext())
+                tasksToProcess = new List<FlowTask>(_activeTasks);
+
+                // 更新性能计数器
+                if (tasksToProcess.Count > PeakActiveTasks)
                 {
-                    _activeTasks.Remove(node);
-                    RecycleTask(task);
+                    PeakActiveTasks = tasksToProcess.Count;
                 }
-                node = prevNode;
             }
+
+            // 按优先级排序（高优先级先执行）
+            tasksToProcess.Sort();
+
+            List<FlowTask> tasksToRemove = new List<FlowTask>();
+
+            foreach (var task in tasksToProcess)
+            {
+                bool shouldRemove = false;
+                try
+                {
+                    // Unity 2022.3兼容的Profiler标记
+                    Profiler.BeginSample(task.Config.ProfilerName ?? "FlowTask");
+                    shouldRemove = !task.MoveNext();
+                }
+                catch (Exception e)
+                {
+                    task.SetException(e);
+                    shouldRemove = true;
+                }
+                finally
+                {
+                    Profiler.EndSample();
+                }
+
+                if (shouldRemove)
+                {
+                    tasksToRemove.Add(task);
+                }
+            }
+
+            if (tasksToRemove.Count > 0)
+            {
+                lock (_lockObject)
+                {
+                    foreach (var task in tasksToRemove)
+                    {
+                        if (_activeTasks.Contains(task))
+                        {
+                            _activeTasks.Remove(task);
+                            _taskMap.Remove(task.Id);
+                            RecycleTask(task);
+                            TotalTasksCompleted++;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                            TrackTaskHistory(task);
+#endif
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            Profiler.EndSample();
         }
     }
 
     #endregion
 
-    #region 公共 API - 任务创建
+    #region 公共 API
 
-    /// <summary>
-    /// 启动一个由 FlowScheduler 管理的协程任务。
-    /// </summary>
     public static FlowHandle Start(IEnumerator routine, TaskConfig? config = null)
     {
         if (routine == null)
@@ -526,9 +843,6 @@ public static class FlowScheduler
         return InternalStartTask(routine, null, config ?? TaskConfig.Default);
     }
 
-    /// <summary>
-    /// 启动一个由 FlowScheduler 管理的异步任务。
-    /// </summary>
     public static FlowHandle Start(
         Func<CancellationToken, Task> asyncFunc,
         TaskConfig? config = null
@@ -539,26 +853,22 @@ public static class FlowScheduler
         return InternalStartTask(null, asyncFunc, config ?? TaskConfig.Default);
     }
 
-    /// <summary>
-    /// 在指定延迟后执行一个 Action。
-    /// </summary>
     public static FlowHandle Delay(float delay, Action onComplete, TaskConfig? config = null)
     {
         if (delay < 0)
             throw new ArgumentOutOfRangeException(nameof(delay));
         if (onComplete == null)
             throw new ArgumentNullException(nameof(onComplete));
-        IEnumerator routine()
+
+        IEnumerator Routine()
         {
             yield return delay;
             onComplete.Invoke();
         }
-        return Start(routine(), config);
+
+        return Start(Routine(), config);
     }
 
-    /// <summary>
-    /// 每隔一段时间重复执行一个 Action。
-    /// </summary>
     public static FlowHandle Repeat(
         float interval,
         Action onRepeat,
@@ -570,7 +880,8 @@ public static class FlowScheduler
             throw new ArgumentOutOfRangeException(nameof(interval));
         if (onRepeat == null)
             throw new ArgumentNullException(nameof(onRepeat));
-        IEnumerator routine()
+
+        IEnumerator Routine()
         {
             int currentCount = 0;
             while (count < 0 || currentCount < count)
@@ -580,12 +891,10 @@ public static class FlowScheduler
                 currentCount++;
             }
         }
-        return Start(routine(), config);
+
+        return Start(Routine(), config);
     }
 
-    /// <summary>
-    /// 等待直到一个条件为真，然后执行一个 Action。
-    /// </summary>
     public static FlowHandle WaitUntil(
         Func<bool> condition,
         Action onComplete,
@@ -596,144 +905,158 @@ public static class FlowScheduler
             throw new ArgumentNullException(nameof(condition));
         if (onComplete == null)
             throw new ArgumentNullException(nameof(onComplete));
-        IEnumerator routine()
+
+        IEnumerator Routine()
         {
             yield return new WaitUntil(condition);
             onComplete.Invoke();
         }
-        return Start(routine(), config);
+
+        return Start(Routine(), config);
     }
 
-    #endregion
+    public static FlowHandle WaitForTask(
+        FlowHandle handleToWait,
+        Action onComplete,
+        TaskConfig? config = null
+    )
+    {
+        if (onComplete == null)
+            throw new ArgumentNullException(nameof(onComplete));
 
-    #region 公共 API - 任务控制
+        IEnumerator Routine()
+        {
+            while (handleToWait.IsAlive)
+            {
+                yield return null;
+            }
+            onComplete.Invoke();
+        }
 
-    /// <summary>
-    /// 通过句柄取消任务。
-    /// </summary>
+        return Start(Routine(), config);
+    }
+
+    public static FlowHandle WhenAll(
+        IEnumerable<FlowHandle> handles,
+        Action onComplete,
+        TaskConfig? config = null
+    )
+    {
+        if (onComplete == null)
+            throw new ArgumentNullException(nameof(onComplete));
+
+        IEnumerator Routine()
+        {
+            foreach (var handle in handles)
+            {
+                while (handle.IsAlive)
+                {
+                    yield return null;
+                }
+            }
+            onComplete.Invoke();
+        }
+
+        return Start(Routine(), config);
+    }
+
     public static bool Cancel(FlowHandle handle)
     {
         lock (_lockObject)
         {
-            if (_taskMap.TryGetValue(handle.Id, out FlowTask task))
+            if (
+                _taskMap.TryGetValue(handle.Id, out FlowTask task)
+                && task.Generation == handle.Generation
+            )
             {
                 task.Cancel();
-                RemoveTaskFromActiveList(task);
+                _activeTasks.Remove(task);
+                _taskMap.Remove(task.Id);
+                RecycleTask(task);
                 return true;
             }
-            return false;
         }
+        return false;
     }
 
-    /// <summary>
-    /// 通过句柄暂停任务。
-    /// </summary>
     public static bool Pause(FlowHandle handle)
     {
         lock (_lockObject)
         {
-            if (_taskMap.TryGetValue(handle.Id, out FlowTask task))
+            if (
+                _taskMap.TryGetValue(handle.Id, out FlowTask task)
+                && task.Generation == handle.Generation
+            )
             {
                 task.Pause();
                 return true;
             }
-            return false;
         }
+        return false;
     }
 
-    /// <summary>
-    /// 通过句柄恢复任务。
-    /// </summary>
     public static bool Resume(FlowHandle handle)
     {
         lock (_lockObject)
         {
-            if (_taskMap.TryGetValue(handle.Id, out FlowTask task))
+            if (
+                _taskMap.TryGetValue(handle.Id, out FlowTask task)
+                && task.Generation == handle.Generation
+            )
             {
                 task.Resume();
                 return true;
             }
-            return false;
+        }
+        return false;
+    }
+
+    public static void CancelAll()
+    {
+        lock (_lockObject)
+        {
+            var tasks = new List<FlowTask>(_activeTasks);
+            foreach (var task in tasks)
+            {
+                task.Cancel();
+                _activeTasks.Remove(task);
+                _taskMap.Remove(task.Id);
+                RecycleTask(task);
+            }
         }
     }
 
-    /// <summary>
-    /// 停止所有活跃任务。
-    /// </summary>
-    public static void StopAll()
+    public static void PauseAll()
     {
         lock (_lockObject)
         {
             foreach (var task in _activeTasks)
             {
-                task.Cancel();
+                if (task.State == TaskState.Running)
+                {
+                    task.Pause();
+                }
             }
-            _activeTasks.Clear();
-            _taskMap.Clear();
-            _coroutineHost.StopAllCoroutines();
+        }
+    }
+
+    public static void ResumeAll()
+    {
+        lock (_lockObject)
+        {
+            foreach (var task in _activeTasks)
+            {
+                if (task.State == TaskState.Paused)
+                {
+                    task.Resume();
+                }
+            }
         }
     }
 
     #endregion
 
-    #region 内部对象池与任务管理
-
-    private static FlowTask GetTaskFromPool()
-    {
-        lock (_lockObject)
-        {
-            return _taskPool.Count > 0 ? _taskPool.Pop() : new FlowTask();
-        }
-    }
-
-    private static void RecycleTask(FlowTask task)
-    {
-        lock (_lockObject)
-        {
-            if (task.Id != 0)
-            {
-                _taskMap.Remove(task.Id);
-            }
-            task.ResetInternalState();
-            if (_taskPool.Count < MAX_POOL_SIZE)
-            {
-                _taskPool.Push(task);
-            }
-        }
-    }
-
-    private static void RemoveTaskFromActiveList(FlowTask task)
-    {
-        lock (_lockObject)
-        {
-            var node = _activeTasks.First;
-            while (node != null)
-            {
-                if (node.Value == task)
-                {
-                    _activeTasks.Remove(node);
-                    RecycleTask(task);
-                    return;
-                }
-                node = node.Next;
-            }
-        }
-    }
-
-    private static IEnumerator AutoTrimPoolRoutine()
-    {
-        while (true)
-        {
-            yield return AUTO_TRIM_INTERVAL;
-            lock (_lockObject)
-            {
-                while (_taskPool.Count > INITIAL_POOL_SIZE)
-                {
-                    _taskPool.Pop();
-                }
-            }
-        }
-    }
+    #region 内部工具与对象池
 
     private static FlowHandle InternalStartTask(
         IEnumerator routine,
@@ -741,24 +1064,256 @@ public static class FlowScheduler
         TaskConfig config
     )
     {
+        FlowTask task;
         lock (_lockObject)
         {
-            FlowTask task = GetTaskFromPool();
+            task = _taskPool.Count > 0 ? _taskPool.Pop() : new FlowTask();
+            int taskId = _nextTaskId++;
+            if (_nextTaskId == int.MaxValue)
+                _nextTaskId = 1;
+
             if (routine != null)
-            {
-                task.Initialize(routine, config);
-            }
-            else
-            {
-                task.Initialize(asyncFunc, config);
-            }
+                task.Initialize(taskId, routine, config);
+            else if (asyncFunc != null)
+                task.Initialize(taskId, asyncFunc, config);
 
             _activeTasks.AddLast(task);
-            _taskMap[task.Id] = task;
+            _taskMap[taskId] = task;
+            TotalTasksCreated++;
 
-            return new FlowHandle(task.Id);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            TrackTaskHistory(task);
+#endif
+
+            return new FlowHandle(taskId, task.Generation);
         }
     }
+
+    private static void RecycleTask(FlowTask task)
+    {
+        task.ResetInternalState();
+        if (_taskPool.Count < _maxPoolSize)
+        {
+            _taskPool.Push(task);
+        }
+    }
+
+    #region 动态对象池策略
+    private static int _poolTargetSize;
+    private const float POOL_GROWTH_FACTOR = 1.5f;
+    private const float POOL_SHRINK_FACTOR = 0.7f;
+
+    private static IEnumerator ManagementRoutine()
+    {
+        var waitForPoolAdjust = new WaitForSecondsRealtime(POOL_ADJUST_INTERVAL);
+        var waitForAutoTrim = new WaitForSecondsRealtime(AUTO_TRIM_INTERVAL);
+
+        while (true)
+        {
+            yield return waitForPoolAdjust;
+            AdjustPoolSize();
+
+            yield return waitForAutoTrim;
+            TrimPool();
+        }
+    }
+
+    private static void AdjustPoolSize()
+    {
+        lock (_lockObject)
+        {
+            // 基于使用率动态调整池大小
+            float usageRatio = (float)TotalTasksCreated / Mathf.Max(1, TotalTasksCompleted);
+
+            if (usageRatio > 1.2f && _poolTargetSize < _maxPoolSize)
+            {
+                // 使用率增长，扩大池
+                _poolTargetSize = Mathf.Min(
+                    _maxPoolSize,
+                    Mathf.CeilToInt(_poolTargetSize * POOL_GROWTH_FACTOR)
+                );
+            }
+            else if (usageRatio < 0.8f && _poolTargetSize > _initialPoolSize)
+            {
+                // 使用率下降，缩小池
+                _poolTargetSize = Mathf.Max(
+                    _initialPoolSize,
+                    Mathf.FloorToInt(_poolTargetSize * POOL_SHRINK_FACTOR)
+                );
+            }
+
+            // 确保实际池大小匹配目标
+            while (_taskPool.Count > _poolTargetSize)
+            {
+                _taskPool.Pop();
+            }
+
+            while (_taskPool.Count < _poolTargetSize)
+            {
+                _taskPool.Push(new FlowTask());
+            }
+        }
+    }
+
+    private static void TrimPool()
+    {
+        lock (_lockObject)
+        {
+            int trimCount = Math.Max(0, _taskPool.Count - _poolTargetSize);
+            for (int i = 0; i < trimCount; i++)
+            {
+                _taskPool.Pop();
+            }
+        }
+    }
+    #endregion
+
+    #region 增强的任务生命周期跟踪
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+    private static readonly List<FlowTask> _taskHistory = new List<FlowTask>(100);
+    private const int MAX_HISTORY = 200;
+
+    private static void TrackTaskHistory(FlowTask task)
+    {
+        lock (_lockObject)
+        {
+            if (_taskHistory.Count >= MAX_HISTORY)
+            {
+                _taskHistory.RemoveAt(0);
+            }
+            _taskHistory.Add(task);
+        }
+    }
+
+    public static IEnumerable<string> GetTaskHistory(int maxCount = 20)
+    {
+        lock (_lockObject)
+        {
+            int count = Math.Min(maxCount, _taskHistory.Count);
+            for (int i = _taskHistory.Count - 1; i >= _taskHistory.Count - count; i--)
+            {
+                var task = _taskHistory[i];
+                yield return $"[{task.Id}] {task.Config.Name} - {task.State} ({task.GetElapsedTime():F2}s)";
+            }
+        }
+    }
+#endif
+    #endregion
+
+    #region 调试API
+
+    public static int ActiveTaskCount
+    {
+        get
+        {
+            lock (_lockObject)
+            {
+                return _activeTasks.Count;
+            }
+        }
+    }
+
+    public static int TaskPoolCount
+    {
+        get
+        {
+            lock (_lockObject)
+            {
+                return _taskPool.Count;
+            }
+        }
+    }
+
+    public static string PerformanceSummary
+    {
+        get
+        {
+            return $"Tasks: {TotalTasksCreated} created, {TotalTasksCompleted} completed, {ActiveTaskCount} active\n"
+                + $"Peak: {PeakActiveTasks} active tasks\n"
+                + $"Pool: {TaskPoolCount}/{_maxPoolSize}";
+        }
+    }
+
+    public static List<string> GetActiveTaskDetails()
+    {
+        lock (_lockObject)
+        {
+            var details = new List<string>();
+            foreach (var task in _activeTasks)
+            {
+                string exceptionInfo =
+                    task.Exception != null ? $" | Exception: {task.Exception.Message}" : "";
+                details.Add(
+                    $"ID: {task.Id} | State: {task.State} | Elapsed: {task.GetElapsedTime():F2}s | "
+                        + $"Name: {(string.IsNullOrEmpty(task.Config.Name) ? "N/A" : task.Config.Name)} | "
+                        + $"Priority: {task.Config.Priority}{exceptionInfo}"
+                );
+            }
+            return details;
+        }
+    }
+
+    public static FlowHandle? FindTaskByName(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return null;
+
+        lock (_lockObject)
+        {
+            foreach (var task in _activeTasks)
+            {
+                if (task.Config.Name == name && task.State != TaskState.Completed)
+                {
+                    return new FlowHandle(task.Id, task.Generation);
+                }
+            }
+        }
+        return null;
+    }
+
+    #endregion
+
+    #region 场景持久化配置
+    [Serializable]
+    public class SchedulerSettings
+    {
+        public bool DontDestroyOnLoad = true;
+        public InjectionPoint InjectionPoint = InjectionPoint.AfterPreLateUpdate;
+        public string CustomInjectionPoint;
+        public int InitialPoolSize = 50;
+        public int MaxPoolSize = 500;
+    }
+
+    private static SchedulerSettings _settings;
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    private static void LoadSettings()
+    {
+        // 在实际项目中，这里可以从配置文件加载设置
+        _settings = new SchedulerSettings();
+
+        // 应用设置
+        ConfigurePlayerLoopInjection(_settings.InjectionPoint, _settings.CustomInjectionPoint);
+
+        // 更新池大小
+        _initialPoolSize = _settings.InitialPoolSize;
+        _maxPoolSize = _settings.MaxPoolSize;
+        _poolTargetSize = _initialPoolSize;
+    }
+
+    public static void Configure(SchedulerSettings settings)
+    {
+        if (_isPlayerLoopInitialized)
+        {
+            Debug.LogWarning(
+                "[FlowScheduler] Already initialized. Some settings may not take effect."
+            );
+        }
+
+        _settings = settings;
+        LoadSettings();
+    }
+    #endregion
 
     #endregion
 }
