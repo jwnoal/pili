@@ -9,1314 +9,991 @@ publishDate: "2023-03-10"
 updatedDate: "2023-03-10"
 ---
 
+#### TimeManager 的使用
+
+```csharp
+// 延迟：
+int _delayId = TimeManager.Instance.CreateDelay(
+    10f,
+    (id) =>
+    {
+        TimeManager.Instance.CancelDelay(_repeatId);
+    },
+    name: "delay"
+);
+// 重复：
+int _repeatId = TimeManager.Instance.CreateDelay(
+    1f,
+    (id) =>
+    {
+        Debug.Log("repeat");
+    },
+    repeat: true,
+    maxRepeats: 3,
+    name: "repeat"
+);
+// 帧延迟：
+int _frameDelayId = TimeManager.Instance.DelayFrames(10, (id) =>
+{
+    Debug.Log("10帧后执行");
+});
+// 暂停任务
+TimeManager.Instance.SetPaused(_taskId, true);
+// 恢复任务
+TimeManager.Instance.SetPaused(_taskId, false);
+// 取消任务
+TimeManager.Instance.CancelDelay(_taskId);
+// 停止所有任务
+TimeManager.Instance.StopAllDelays(); // 使用 StopAllDelays()会取消所有任务，包括重复任务
+// 获取任务进度
+float progress = TimeManager.Instance.GetTaskProgress(_taskId);
+if(progress.HasValue)
+Debug.Log($"任务进度: {progress.Value * 100}%");
+// 获取任务状态
+DelayTaskState state = TimeManager.Instance.GetTaskState(_taskId);
+if(state.HasValue)
+Debug.Log($"任务状态: {state.Value}");
+// 获取任务名称
+string taskName = TimeManager.Instance.GetTaskName(taskId);
+// 获取已用时间
+float? elapsed = TimeManager.Instance.GetElapsedTime(taskId);
+// 检查是否暂停
+bool isPaused = TimeManager.Instance.IsTaskPaused(taskId);
+// 获取执行次数
+int count = TimeManager.Instance.GetTaskExecutionCount(taskId);
+// 当目标对象被销毁时，任务会自动取消：
+TimeManager.Instance.DelaySeconds(5.0f, (id) =>
+{
+    Debug.Log("5秒后执行");
+}, target: this.gameObject);
+
+```
+
+#### TimeManager
+
 ```csharp
 using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Diagnostics;
+using System.Linq;
 using UnityEngine;
-using UnityEngine.LowLevel;
-using UnityEngine.PlayerLoop;
-using UnityEngine.Profiling;
-#if UNITY_EDITOR
-using UnityEditor;
-#endif
 
-/// <summary>
-/// FlowScheduler - 高性能、零GC、统一的协程与异步任务调度器
-/// 版本 3.2 - Unity 2022.3兼容版
-/// </summary>
-public static class FlowScheduler
+[DefaultExecutionOrder(-100)]
+public class TimeManager : MonoBehaviour
 {
-    #region 核心数据结构与配置
+    // 单例实现
+    private static TimeManager _instance;
+    public static TimeManager Instance => _instance ??= InitializeInstance();
 
-    private static readonly object _lockObject = new object();
-    private static int _initialPoolSize = 50;
-    private static int _maxPoolSize = 500;
-    private const float AUTO_TRIM_INTERVAL = 30f;
-    private const float POOL_ADJUST_INTERVAL = 10f;
-
-    private static readonly LinkedList<FlowTask> _activeTasks = new LinkedList<FlowTask>();
-    private static readonly Stack<FlowTask> _taskPool = new Stack<FlowTask>();
-    private static readonly Dictionary<int, FlowTask> _taskMap = new Dictionary<int, FlowTask>();
-    private static int _nextTaskId = 1;
-
-    private static bool _isPlayerLoopInitialized = false;
-    private static CoroutineHost _coroutineHost;
-
-    // 性能计数器
-    public static int TotalTasksCreated { get; private set; }
-    public static int TotalTasksCompleted { get; private set; }
-    public static int PeakActiveTasks { get; private set; }
-
-    #endregion
-
-    #region 枚举与结构体
-
-    public enum TaskState
+    private static TimeManager InitializeInstance()
     {
-        Running,
-        Paused,
-        Completed,
-        Cancelled,
-        Faulted,
+        var existing = FindObjectOfType<TimeManager>();
+        if (existing)
+            return existing;
+
+        var go = new GameObject("TimeManager");
+        var instance = go.AddComponent<TimeManager>();
+        DontDestroyOnLoad(go);
+        return instance;
     }
 
-    public enum TimeMode
+    // 任务管理数据结构
+    private readonly Dictionary<int, TimeTask> _tasks = new Dictionary<int, TimeTask>();
+    private readonly Queue<TimeTask> _pendingAdd = new Queue<TimeTask>();
+    private readonly HashSet<int> _pendingRemove = new HashSet<int>();
+    private readonly Queue<TimeTask> _taskPool = new Queue<TimeTask>();
+    private int _idCounter = 1;
+
+    // 线程安全锁
+    private static readonly object _lock = new object();
+
+    // 时间缩放
+    [SerializeField, Tooltip("全局时间缩放因子，影响所有延时任务")]
+    private float _timeScale = 1f;
+    public float TimeScale
     {
-        Scaled,
-        Unscaled,
+        get => _timeScale;
+        set => _timeScale = Mathf.Max(0, value);
     }
 
-    public enum InjectionPoint
+    // 高精度计时器
+    private Stopwatch _stopwatch;
+    private const double MAX_TIME = double.MaxValue / 2; // 防止长时间运行溢出
+
+    // 任务池大小限制
+    private const int MAX_POOL_SIZE = 1024;
+
+    void Awake()
     {
-        AfterUpdate,
-        AfterFixedUpdate,
-        AfterPreLateUpdate,
-        Custom,
-    }
-
-    public struct TaskConfig
-    {
-        public TimeMode TimeMode;
-        public CancellationToken CancellationToken;
-        public string Name;
-        public int Priority;
-        public string ProfilerName;
-
-        public static TaskConfig Default =>
-            new TaskConfig
-            {
-                TimeMode = TimeMode.Scaled,
-                CancellationToken = CancellationToken.None,
-                Name = null,
-                Priority = 0,
-                ProfilerName = null,
-            };
-    }
-
-    public struct FlowHandle : IEquatable<FlowHandle>
-    {
-        public readonly int Id;
-        public readonly int Generation;
-
-        internal FlowHandle(int id, int generation)
+        if (_instance != null && _instance != this)
         {
-            Id = id;
-            Generation = generation;
-        }
-
-        public bool IsValid
-        {
-            get
-            {
-                lock (_lockObject)
-                {
-                    return _taskMap.TryGetValue(Id, out var task)
-                        && task.State != TaskState.Completed
-                        && task.Generation == Generation;
-                }
-            }
-        }
-
-        public TaskState State
-        {
-            get
-            {
-                lock (_lockObject)
-                {
-                    if (_taskMap.TryGetValue(Id, out var task) && task.Generation == Generation)
-                    {
-                        return task.State;
-                    }
-                    return TaskState.Completed;
-                }
-            }
-        }
-
-        public float ElapsedTime
-        {
-            get
-            {
-                lock (_lockObject)
-                {
-                    if (_taskMap.TryGetValue(Id, out var task) && task.Generation == Generation)
-                    {
-                        return task.GetElapsedTime();
-                    }
-                    return 0f;
-                }
-            }
-        }
-
-        public void Cancel() => FlowScheduler.Cancel(this);
-
-        public void Pause() => FlowScheduler.Pause(this);
-
-        public void Resume() => FlowScheduler.Resume(this);
-
-        public bool IsAlive => State == TaskState.Running || State == TaskState.Paused;
-
-        public override bool Equals(object obj) => obj is FlowHandle other && Equals(other);
-
-        public bool Equals(FlowHandle other) => Id == other.Id && Generation == other.Generation;
-
-        public override int GetHashCode() => HashCode.Combine(Id, Generation);
-
-        public static bool operator ==(FlowHandle lhs, FlowHandle rhs) => lhs.Equals(rhs);
-
-        public static bool operator !=(FlowHandle lhs, FlowHandle rhs) => !lhs.Equals(rhs);
-    }
-
-    #endregion
-
-    #region 内部核心任务类
-
-    private class FlowTask : IComparable<FlowTask>
-    {
-        public int Id { get; private set; }
-        public int Generation { get; private set; }
-        public TaskState State { get; private set; }
-        public TaskConfig Config { get; private set; }
-        public Exception Exception { get; private set; }
-        public float LastUpdateTime { get; private set; }
-        public double StartTime { get; private set; }
-
-        private IEnumerator _coroutineRoutine;
-        private CancellationTokenSource _taskCts;
-        private double _pauseTime;
-        private double _totalPausedDuration;
-        private Coroutine _currentProxyCoroutine;
-        private bool _isProxyRunning;
-
-        #region 状态控制方法
-        public void MarkRunning() => State = TaskState.Running;
-
-        public void MarkPaused() => State = TaskState.Paused;
-
-        public void MarkCancelled() => State = TaskState.Cancelled;
-
-        public void MarkCompleted() => State = TaskState.Completed;
-
-        public void MarkFaulted() => State = TaskState.Faulted;
-
-        public void SetException(Exception e)
-        {
-            Exception = e;
-            MarkFaulted();
-        }
-        #endregion
-
-        public void Initialize(int id, IEnumerator routine, TaskConfig config)
-        {
-            ResetInternalState();
-            Id = id;
-            Config = config;
-            _coroutineRoutine = routine;
-            _taskCts = CancellationTokenSource.CreateLinkedTokenSource(config.CancellationToken);
-            MarkRunning();
-            StartTime = GetCurrentTime(Config);
-            LastUpdateTime = (float)StartTime;
-        }
-
-        public void Initialize(int id, Func<CancellationToken, Task> asyncFunc, TaskConfig config)
-        {
-            ResetInternalState();
-            Id = id;
-            Config = config;
-            _taskCts = CancellationTokenSource.CreateLinkedTokenSource(config.CancellationToken);
-            MarkRunning();
-            StartTime = GetCurrentTime(Config);
-            LastUpdateTime = (float)StartTime;
-            _coroutineRoutine = RunAsyncWrapper(asyncFunc, _taskCts.Token);
-        }
-
-        private IEnumerator RunAsyncWrapper(
-            Func<CancellationToken, Task> asyncFunc,
-            CancellationToken token
-        )
-        {
-            Task runningTask = null;
-            Exception caughtException = null;
-
-            try
-            {
-                runningTask = asyncFunc.Invoke(token);
-            }
-            catch (Exception e)
-            {
-                caughtException = e;
-            }
-
-            if (caughtException != null)
-            {
-                SetException(caughtException);
-                yield break;
-            }
-
-            if (runningTask == null)
-            {
-                yield break;
-            }
-
-            while (!runningTask.IsCompleted)
-            {
-                if (token.IsCancellationRequested)
-                {
-                    break;
-                }
-                yield return null;
-            }
-
-            if (runningTask.IsFaulted && runningTask.Exception != null)
-            {
-                SetException(runningTask.Exception);
-            }
-        }
-
-        public bool MoveNext()
-        {
-            // 更新最后执行时间
-            LastUpdateTime = (float)GetCurrentTime(Config);
-
-            // 先检查暂停状态 - 保持任务活跃但不执行
-            if (State == TaskState.Paused)
-                return true;
-
-            // 再检查其他终止状态
-            if (State != TaskState.Running)
-                return false;
-
-            if (_taskCts != null && _taskCts.Token.IsCancellationRequested)
-            {
-                MarkCancelled();
-                return false;
-            }
-
-            try
-            {
-                if (_isProxyRunning)
-                {
-                    return true;
-                }
-
-                if (_coroutineRoutine == null)
-                {
-                    MarkCompleted();
-                    return false;
-                }
-
-                bool hasNext = _coroutineRoutine.MoveNext();
-
-                if (_isProxyRunning)
-                {
-                    return true;
-                }
-
-                var currentYield = _coroutineRoutine.Current;
-
-                // 使用模式匹配优化类型判断
-                switch (currentYield)
-                {
-                    case float floatDelay:
-                        StartProxyCoroutine(WaitForSecondsInternal(floatDelay, Config.TimeMode));
-                        break;
-                    case Coroutine coroutine:
-                        StartProxyCoroutine(coroutine);
-                        break;
-                    case YieldInstruction yieldInstruction:
-                        StartProxyCoroutine(yieldInstruction);
-                        break;
-                    case CustomYieldInstruction customYield:
-                        StartProxyCoroutine(customYield);
-                        break;
-                }
-
-                if (!hasNext)
-                {
-                    MarkCompleted();
-                }
-                return hasNext;
-            }
-            catch (Exception e)
-            {
-                SetException(e);
-                MarkCompleted();
-                return false;
-            }
-        }
-
-        private void StartProxyCoroutine(object instruction)
-        {
-            if (instruction == null)
-                return;
-
-            _isProxyRunning = true;
-            _currentProxyCoroutine = _coroutineHost.StartProxyCoroutine(
-                instruction,
-                () =>
-                {
-                    _isProxyRunning = false;
-                }
-            );
-        }
-
-        private IEnumerator WaitForSecondsInternal(float seconds, TimeMode timeMode)
-        {
-            double elapsed = 0f;
-            Func<double> deltaTimeFunc =
-                (timeMode == TimeMode.Unscaled)
-                    ? () => Time.unscaledDeltaTime
-                    : () => Time.deltaTime;
-
-            while (elapsed < seconds)
-            {
-                // 处理暂停状态
-                while (State == TaskState.Paused)
-                {
-                    yield return null;
-                }
-
-                // 检查是否被取消
-                if (State != TaskState.Running)
-                {
-                    yield break;
-                }
-
-                elapsed += deltaTimeFunc();
-                yield return null;
-            }
-        }
-
-        public void ResetInternalState()
-        {
-            _coroutineRoutine = null;
-            if (_currentProxyCoroutine != null)
-            {
-                _coroutineHost?.StopProxyCoroutine(_currentProxyCoroutine);
-                _currentProxyCoroutine = null;
-            }
-            _isProxyRunning = false;
-            State = TaskState.Completed;
-            StartTime = 0f;
-            _pauseTime = 0f;
-            _totalPausedDuration = 0f;
-            Generation++;
-            Exception = null;
-            LastUpdateTime = 0f;
-
-            if (_taskCts != null)
-            {
-                _taskCts.Dispose();
-                _taskCts = null;
-            }
-        }
-
-        public void Pause()
-        {
-            if (State == TaskState.Running)
-            {
-                MarkPaused();
-                _pauseTime = GetCurrentTime(Config);
-            }
-        }
-
-        public void Resume()
-        {
-            if (State == TaskState.Paused)
-            {
-                MarkRunning();
-                _totalPausedDuration += GetCurrentTime(Config) - _pauseTime;
-            }
-        }
-
-        public void Cancel()
-        {
-            if (State == TaskState.Running || State == TaskState.Paused)
-            {
-                MarkCancelled();
-                _taskCts?.Cancel();
-                if (_currentProxyCoroutine != null)
-                {
-                    _coroutineHost?.StopProxyCoroutine(_currentProxyCoroutine);
-                }
-            }
-        }
-
-        public float GetElapsedTime()
-        {
-            double currentTime = GetCurrentTime(Config);
-            return (float)(
-                (State == TaskState.Paused ? _pauseTime : currentTime)
-                - StartTime
-                - _totalPausedDuration
-            );
-        }
-
-        private double GetCurrentTime(TaskConfig config) =>
-            config.TimeMode == TimeMode.Unscaled ? Time.unscaledTimeAsDouble : Time.timeAsDouble;
-
-        // 实现优先级比较
-        public int CompareTo(FlowTask other)
-        {
-            return other.Config.Priority.CompareTo(Config.Priority);
-        }
-    }
-
-    #endregion
-
-    #region 协程宿主 (隐藏的 MonoBehaviour)
-
-    private class CoroutineHost : MonoBehaviour
-    {
-        private static CoroutineHost _instance;
-        public static CoroutineHost Instance
-        {
-            get
-            {
-                if (_instance == null)
-                {
-                    GameObject helperObject = new GameObject("FlowSchedulerHost");
-                    helperObject.hideFlags = HideFlags.HideAndDontSave;
-                    DontDestroyOnLoad(helperObject);
-                    _instance = helperObject.AddComponent<CoroutineHost>();
-                }
-                return _instance;
-            }
-        }
-
-        private readonly object _proxyLock = new object();
-        private readonly Dictionary<object, Coroutine> _activeProxies =
-            new Dictionary<object, Coroutine>();
-
-        public Coroutine StartProxyCoroutine(object instruction, Action onComplete)
-        {
-            if (instruction == null)
-                return null;
-
-            lock (_proxyLock)
-            {
-                StopProxyCoroutine(instruction);
-                Coroutine newCoroutine = StartCoroutine(WrapperCoroutine(instruction, onComplete));
-                _activeProxies[instruction] = newCoroutine;
-                return newCoroutine;
-            }
-        }
-
-        public void StopProxyCoroutine(object instruction)
-        {
-            if (instruction == null)
-                return;
-
-            lock (_proxyLock)
-            {
-                if (_activeProxies.TryGetValue(instruction, out Coroutine existingCoroutine))
-                {
-                    StopCoroutine(existingCoroutine);
-                    _activeProxies.Remove(instruction);
-                }
-            }
-        }
-
-        public void StopAllCoroutinesInternal()
-        {
-            lock (_proxyLock)
-            {
-                StopAllCoroutines();
-                _activeProxies.Clear();
-            }
-        }
-
-        private IEnumerator WrapperCoroutine(object instruction, Action onComplete)
-        {
-            yield return instruction;
-
-            lock (_proxyLock)
-            {
-                _activeProxies.Remove(instruction);
-            }
-
-            onComplete?.Invoke();
-        }
-
-        void OnDestroy()
-        {
-            lock (_proxyLock)
-            {
-                _activeProxies.Clear();
-            }
-        }
-    }
-
-    #endregion
-
-    #region 初始化、清理与 PlayerLoop 集成
-
-    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
-    private static void Initialize()
-    {
-        Cleanup();
-
-        lock (_lockObject)
-        {
-            // 初始化对象池
-            for (int i = 0; i < _initialPoolSize; i++)
-            {
-                _taskPool.Push(new FlowTask());
-            }
-
-            _coroutineHost = CoroutineHost.Instance;
-            SetupCustomPlayerLoop();
-
-            // 启动管理协程
-            Start(
-                ManagementRoutine(),
-                new TaskConfig
-                {
-                    Name = "FlowScheduler_Management",
-                    Priority = int.MinValue, // 最低优先级
-                }
-            );
-        }
-
-#if UNITY_EDITOR
-        EditorApplication.quitting += OnEditorQuitting;
-#endif
-    }
-
-    private static void Cleanup()
-    {
-        lock (_lockObject)
-        {
-            foreach (var task in _activeTasks)
-            {
-                task.Cancel();
-            }
-            _activeTasks.Clear();
-            _taskMap.Clear();
-            _taskPool.Clear();
-            _nextTaskId = 1;
-            PeakActiveTasks = 0;
-            TotalTasksCreated = 0;
-            TotalTasksCompleted = 0;
-
-            if (_coroutineHost != null)
-            {
-                _coroutineHost.StopAllCoroutinesInternal();
-            }
-        }
-    }
-
-#if UNITY_EDITOR
-    private static void OnEditorQuitting()
-    {
-        EditorApplication.quitting -= OnEditorQuitting;
-        Cleanup();
-    }
-#endif
-
-    private static InjectionPoint _injectionPoint = InjectionPoint.AfterPreLateUpdate;
-    private static string _customInjectionPoint;
-
-    public static void ConfigurePlayerLoopInjection(InjectionPoint point, string customPoint = null)
-    {
-        if (_isPlayerLoopInitialized)
-        {
-            Debug.LogWarning(
-                "[FlowScheduler] PlayerLoop already initialized. Changes will take effect on next initialization."
-            );
-        }
-
-        _injectionPoint = point;
-        _customInjectionPoint = customPoint;
-    }
-
-    private static void SetupCustomPlayerLoop()
-    {
-        if (_isPlayerLoopInitialized)
+            Destroy(gameObject);
             return;
-
-        var currentLoop = PlayerLoop.GetCurrentPlayerLoop();
-        if (currentLoop.subSystemList == null)
-            return;
-
-        // 检查是否已经注入
-        foreach (var system in currentLoop.subSystemList)
-        {
-            if (system.type == typeof(FlowScheduler))
-            {
-                _isPlayerLoopInitialized = true;
-                return;
-            }
-
-            if (system.subSystemList != null)
-            {
-                foreach (var subSystem in system.subSystemList)
-                {
-                    if (subSystem.type == typeof(FlowScheduler))
-                    {
-                        _isPlayerLoopInitialized = true;
-                        return;
-                    }
-                }
-            }
         }
 
-        var timeManagerSystem = new PlayerLoopSystem()
-        {
-            type = typeof(FlowScheduler),
-            updateDelegate = UpdateFlowTasks,
-        };
-
-        // 增强PlayerLoop注入的健壮性
-        for (int i = 0; i < currentLoop.subSystemList.Length; i++)
-        {
-            if (currentLoop.subSystemList[i].type == typeof(Update))
-            {
-                var updateSubsystems = new List<PlayerLoopSystem>(
-                    currentLoop.subSystemList[i].subSystemList
-                );
-
-                // 增强的注入点选择逻辑
-                int insertIndex = -1;
-                string pointName = null;
-
-                switch (_injectionPoint)
-                {
-                    case InjectionPoint.AfterUpdate:
-                        insertIndex = updateSubsystems.FindIndex(s => s.type == typeof(Update));
-                        pointName = "Update";
-                        break;
-
-                    case InjectionPoint.AfterFixedUpdate:
-                        insertIndex = updateSubsystems.FindIndex(s =>
-                            s.type == typeof(FixedUpdate)
-                        );
-                        pointName = "FixedUpdate";
-                        break;
-
-                    case InjectionPoint.AfterPreLateUpdate:
-                        insertIndex = updateSubsystems.FindIndex(s =>
-                            s.type == typeof(PreLateUpdate)
-                        );
-                        pointName = "PreLateUpdate";
-                        break;
-
-                    case InjectionPoint.Custom:
-                        if (!string.IsNullOrEmpty(_customInjectionPoint))
-                        {
-                            insertIndex = updateSubsystems.FindIndex(s =>
-                                s.type.Name.Contains(_customInjectionPoint)
-                            );
-                            pointName = _customInjectionPoint;
-                        }
-                        break;
-                }
-
-                if (insertIndex == -1)
-                {
-                    // 回退到智能选择
-                    int[] priorityPoints = new[]
-                    {
-                        updateSubsystems.FindIndex(s =>
-                            s.type.Name.Contains("ScriptRunBehaviourLateUpdate")
-                        ),
-                        updateSubsystems.FindIndex(s => s.type == typeof(PreLateUpdate)),
-                        updateSubsystems.FindIndex(s => s.type == typeof(Update)),
-                        updateSubsystems.Count - 1,
-                    };
-
-                    foreach (int index in priorityPoints)
-                    {
-                        if (index >= 0)
-                        {
-                            insertIndex = index;
-                            pointName = updateSubsystems[index].type.Name;
-                            break;
-                        }
-                    }
-                }
-
-                if (insertIndex >= 0)
-                {
-                    Debug.Log($"[FlowScheduler] Injecting at: {pointName}");
-                    updateSubsystems.Insert(insertIndex + 1, timeManagerSystem);
-                }
-                else
-                {
-                    updateSubsystems.Add(timeManagerSystem);
-                }
-
-                currentLoop.subSystemList[i].subSystemList = updateSubsystems.ToArray();
-                break;
-            }
-        }
-
-        PlayerLoop.SetPlayerLoop(currentLoop);
-        _isPlayerLoopInitialized = true;
+        _instance = this;
+        _stopwatch = Stopwatch.StartNew();
     }
 
-    private static void UpdateFlowTasks()
+    void OnDestroy()
     {
-        Profiler.BeginSample("FlowScheduler.Update");
+        if (_instance == this)
+        {
+            StopAllDelays();
+            _instance = null;
+        }
+    }
+
+    void Update()
+    {
+        ProcessPendingTasks();
+        UpdateActiveTasks();
+        CleanupRemovedTasks();
+    }
+
+    #region 核心任务处理
+    private void ProcessPendingTasks()
+    {
+        lock (_lock)
+        {
+            while (_pendingAdd.Count > 0)
+            {
+                var task = _pendingAdd.Dequeue();
+                if (!_tasks.ContainsKey(task.Id))
+                {
+                    _tasks.Add(task.Id, task);
+                    task.State = DelayTaskState.Active;
+                }
+            }
+        }
+    }
+
+    private void UpdateActiveTasks()
+    {
+        double currentTime = GetPreciseTime();
+        List<TimeTask> tasksToUpdate = new List<TimeTask>(_tasks.Count); // 预分配容量以减少重分配
+
+        lock (_lock)
+        {
+            // 手动收集活跃任务，避免LINQ开销
+            foreach (var task in _tasks.Values)
+            {
+                if (
+                    task.State == DelayTaskState.Active
+                    && !task.IsPaused
+                    && !_pendingRemove.Contains(task.Id)
+                )
+                {
+                    tasksToUpdate.Add(task);
+                }
+            }
+        }
+
+        foreach (var task in tasksToUpdate)
+        {
+            if (task.IsFrameBased)
+            {
+                task.CurrentFrame++;
+                if (task.CurrentFrame >= task.FrameDuration)
+                {
+                    ProcessTaskExecution(task, currentTime);
+                }
+            }
+            else
+            {
+                double elapsed = (currentTime - task.StartTime) * _timeScale;
+                task.ElapsedTime = elapsed;
+
+                if (elapsed >= task.Duration)
+                {
+                    ProcessTaskExecution(task, currentTime);
+                }
+            }
+        }
+    }
+
+    private void CleanupRemovedTasks()
+    {
+        lock (_lock)
+        {
+            if (_pendingRemove.Count > 0)
+            {
+                foreach (var id in _pendingRemove.ToList())
+                {
+                    if (_tasks.TryGetValue(id, out var task))
+                    {
+                        ReturnTaskToPool(task);
+                        _tasks.Remove(id);
+                    }
+                    _pendingRemove.Remove(id);
+                }
+            }
+        }
+    }
+
+    private void ProcessTaskExecution(TimeTask task, double currentTime)
+    {
+        if (!IsTargetValid(task.Target))
+        {
+            UnityEngine.Debug.LogWarning(
+                $"任务 {task.Id} ({task.Name}) 的目标对象已被销毁，跳过执行"
+            );
+            lock (_lock)
+            {
+                _pendingRemove.Add(task.Id);
+            }
+            return;
+        }
 
         try
         {
-            List<FlowTask> tasksToProcess;
-            lock (_lockObject)
-            {
-                tasksToProcess = new List<FlowTask>(_activeTasks);
-
-                // 更新性能计数器
-                if (tasksToProcess.Count > PeakActiveTasks)
-                {
-                    PeakActiveTasks = tasksToProcess.Count;
-                }
-            }
-
-            // 按优先级排序（高优先级先执行）
-            tasksToProcess.Sort();
-
-            List<FlowTask> tasksToRemove = new List<FlowTask>();
-
-            foreach (var task in tasksToProcess)
-            {
-                bool shouldRemove = false;
-                try
-                {
-                    // Unity 2022.3兼容的Profiler标记
-                    Profiler.BeginSample(task.Config.ProfilerName ?? "FlowTask");
-                    shouldRemove = !task.MoveNext();
-                }
-                catch (Exception e)
-                {
-                    task.SetException(e);
-                    shouldRemove = true;
-                }
-                finally
-                {
-                    Profiler.EndSample();
-                }
-
-                if (shouldRemove)
-                {
-                    tasksToRemove.Add(task);
-                }
-            }
-
-            if (tasksToRemove.Count > 0)
-            {
-                lock (_lockObject)
-                {
-                    foreach (var task in tasksToRemove)
-                    {
-                        if (_activeTasks.Contains(task))
-                        {
-                            _activeTasks.Remove(task);
-                            _taskMap.Remove(task.Id);
-                            RecycleTask(task);
-                            TotalTasksCompleted++;
-
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-                            TrackTaskHistory(task);
-#endif
-                        }
-                    }
-                }
-            }
+            task.Action?.Invoke(task.Id);
+            task.Callback?.Invoke(task.Id, true);
         }
-        finally
+        catch (Exception ex)
         {
-            Profiler.EndSample();
-        }
-    }
-
-    #endregion
-
-    #region 公共 API
-
-    public static FlowHandle Start(IEnumerator routine, TaskConfig? config = null)
-    {
-        if (routine == null)
-            throw new ArgumentNullException(nameof(routine));
-        return InternalStartTask(routine, null, config ?? TaskConfig.Default);
-    }
-
-    public static FlowHandle Start(
-        Func<CancellationToken, Task> asyncFunc,
-        TaskConfig? config = null
-    )
-    {
-        if (asyncFunc == null)
-            throw new ArgumentNullException(nameof(asyncFunc));
-        return InternalStartTask(null, asyncFunc, config ?? TaskConfig.Default);
-    }
-
-    public static FlowHandle Delay(float delay, Action onComplete, TaskConfig? config = null)
-    {
-        if (delay < 0)
-            throw new ArgumentOutOfRangeException(nameof(delay));
-        if (onComplete == null)
-            throw new ArgumentNullException(nameof(onComplete));
-
-        IEnumerator Routine()
-        {
-            yield return delay;
-            onComplete.Invoke();
-        }
-
-        return Start(Routine(), config);
-    }
-
-    public static FlowHandle Repeat(
-        float interval,
-        Action onRepeat,
-        int count = -1,
-        TaskConfig? config = null
-    )
-    {
-        if (interval <= 0)
-            throw new ArgumentOutOfRangeException(nameof(interval));
-        if (onRepeat == null)
-            throw new ArgumentNullException(nameof(onRepeat));
-
-        IEnumerator Routine()
-        {
-            int currentCount = 0;
-            while (count < 0 || currentCount < count)
-            {
-                onRepeat.Invoke();
-                yield return interval;
-                currentCount++;
-            }
-        }
-
-        return Start(Routine(), config);
-    }
-
-    public static FlowHandle WaitUntil(
-        Func<bool> condition,
-        Action onComplete,
-        TaskConfig? config = null
-    )
-    {
-        if (condition == null)
-            throw new ArgumentNullException(nameof(condition));
-        if (onComplete == null)
-            throw new ArgumentNullException(nameof(onComplete));
-
-        IEnumerator Routine()
-        {
-            yield return new WaitUntil(condition);
-            onComplete.Invoke();
-        }
-
-        return Start(Routine(), config);
-    }
-
-    public static FlowHandle WaitForTask(
-        FlowHandle handleToWait,
-        Action onComplete,
-        TaskConfig? config = null
-    )
-    {
-        if (onComplete == null)
-            throw new ArgumentNullException(nameof(onComplete));
-
-        IEnumerator Routine()
-        {
-            while (handleToWait.IsAlive)
-            {
-                yield return null;
-            }
-            onComplete.Invoke();
-        }
-
-        return Start(Routine(), config);
-    }
-
-    public static FlowHandle WhenAll(
-        IEnumerable<FlowHandle> handles,
-        Action onComplete,
-        TaskConfig? config = null
-    )
-    {
-        if (onComplete == null)
-            throw new ArgumentNullException(nameof(onComplete));
-
-        IEnumerator Routine()
-        {
-            foreach (var handle in handles)
-            {
-                while (handle.IsAlive)
-                {
-                    yield return null;
-                }
-            }
-            onComplete.Invoke();
-        }
-
-        return Start(Routine(), config);
-    }
-
-    public static bool Cancel(FlowHandle handle)
-    {
-        lock (_lockObject)
-        {
-            if (
-                _taskMap.TryGetValue(handle.Id, out FlowTask task)
-                && task.Generation == handle.Generation
-            )
-            {
-                task.Cancel();
-                _activeTasks.Remove(task);
-                _taskMap.Remove(task.Id);
-                RecycleTask(task);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    public static bool Pause(FlowHandle handle)
-    {
-        lock (_lockObject)
-        {
-            if (
-                _taskMap.TryGetValue(handle.Id, out FlowTask task)
-                && task.Generation == handle.Generation
-            )
-            {
-                task.Pause();
-                return true;
-            }
-        }
-        return false;
-    }
-
-    public static bool Resume(FlowHandle handle)
-    {
-        lock (_lockObject)
-        {
-            if (
-                _taskMap.TryGetValue(handle.Id, out FlowTask task)
-                && task.Generation == handle.Generation
-            )
-            {
-                task.Resume();
-                return true;
-            }
-        }
-        return false;
-    }
-
-    public static void CancelAll()
-    {
-        lock (_lockObject)
-        {
-            var tasks = new List<FlowTask>(_activeTasks);
-            foreach (var task in tasks)
-            {
-                task.Cancel();
-                _activeTasks.Remove(task);
-                _taskMap.Remove(task.Id);
-                RecycleTask(task);
-            }
-        }
-    }
-
-    public static void PauseAll()
-    {
-        lock (_lockObject)
-        {
-            foreach (var task in _activeTasks)
-            {
-                if (task.State == TaskState.Running)
-                {
-                    task.Pause();
-                }
-            }
-        }
-    }
-
-    public static void ResumeAll()
-    {
-        lock (_lockObject)
-        {
-            foreach (var task in _activeTasks)
-            {
-                if (task.State == TaskState.Paused)
-                {
-                    task.Resume();
-                }
-            }
-        }
-    }
-
-    #endregion
-
-    #region 内部工具与对象池
-
-    private static FlowHandle InternalStartTask(
-        IEnumerator routine,
-        Func<CancellationToken, Task> asyncFunc,
-        TaskConfig config
-    )
-    {
-        FlowTask task;
-        lock (_lockObject)
-        {
-            task = _taskPool.Count > 0 ? _taskPool.Pop() : new FlowTask();
-            int taskId = _nextTaskId++;
-            if (_nextTaskId == int.MaxValue)
-                _nextTaskId = 1;
-
-            if (routine != null)
-                task.Initialize(taskId, routine, config);
-            else if (asyncFunc != null)
-                task.Initialize(taskId, asyncFunc, config);
-
-            _activeTasks.AddLast(task);
-            _taskMap[taskId] = task;
-            TotalTasksCreated++;
-
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            TrackTaskHistory(task);
-#endif
-
-            return new FlowHandle(taskId, task.Generation);
-        }
-    }
-
-    private static void RecycleTask(FlowTask task)
-    {
-        task.ResetInternalState();
-        if (_taskPool.Count < _maxPoolSize)
-        {
-            _taskPool.Push(task);
-        }
-    }
-
-    #region 动态对象池策略
-    private static int _poolTargetSize;
-    private const float POOL_GROWTH_FACTOR = 1.5f;
-    private const float POOL_SHRINK_FACTOR = 0.7f;
-
-    private static IEnumerator ManagementRoutine()
-    {
-        var waitForPoolAdjust = new WaitForSecondsRealtime(POOL_ADJUST_INTERVAL);
-        var waitForAutoTrim = new WaitForSecondsRealtime(AUTO_TRIM_INTERVAL);
-
-        while (true)
-        {
-            yield return waitForPoolAdjust;
-            AdjustPoolSize();
-
-            yield return waitForAutoTrim;
-            TrimPool();
-        }
-    }
-
-    private static void AdjustPoolSize()
-    {
-        lock (_lockObject)
-        {
-            // 基于使用率动态调整池大小
-            float usageRatio = (float)TotalTasksCreated / Mathf.Max(1, TotalTasksCompleted);
-
-            if (usageRatio > 1.2f && _poolTargetSize < _maxPoolSize)
-            {
-                // 使用率增长，扩大池
-                _poolTargetSize = Mathf.Min(
-                    _maxPoolSize,
-                    Mathf.CeilToInt(_poolTargetSize * POOL_GROWTH_FACTOR)
-                );
-            }
-            else if (usageRatio < 0.8f && _poolTargetSize > _initialPoolSize)
-            {
-                // 使用率下降，缩小池
-                _poolTargetSize = Mathf.Max(
-                    _initialPoolSize,
-                    Mathf.FloorToInt(_poolTargetSize * POOL_SHRINK_FACTOR)
-                );
-            }
-
-            // 确保实际池大小匹配目标
-            while (_taskPool.Count > _poolTargetSize)
-            {
-                _taskPool.Pop();
-            }
-
-            while (_taskPool.Count < _poolTargetSize)
-            {
-                _taskPool.Push(new FlowTask());
-            }
-        }
-    }
-
-    private static void TrimPool()
-    {
-        lock (_lockObject)
-        {
-            int trimCount = Math.Max(0, _taskPool.Count - _poolTargetSize);
-            for (int i = 0; i < trimCount; i++)
-            {
-                _taskPool.Pop();
-            }
-        }
-    }
-    #endregion
-
-    #region 增强的任务生命周期跟踪
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-    private static readonly List<FlowTask> _taskHistory = new List<FlowTask>(100);
-    private const int MAX_HISTORY = 200;
-
-    private static void TrackTaskHistory(FlowTask task)
-    {
-        lock (_lockObject)
-        {
-            if (_taskHistory.Count >= MAX_HISTORY)
-            {
-                _taskHistory.RemoveAt(0);
-            }
-            _taskHistory.Add(task);
-        }
-    }
-
-    public static IEnumerable<string> GetTaskHistory(int maxCount = 20)
-    {
-        lock (_lockObject)
-        {
-            int count = Math.Min(maxCount, _taskHistory.Count);
-            for (int i = _taskHistory.Count - 1; i >= _taskHistory.Count - count; i--)
-            {
-                var task = _taskHistory[i];
-                yield return $"[{task.Id}] {task.Config.Name} - {task.State} ({task.GetElapsedTime():F2}s)";
-            }
-        }
-    }
-#endif
-    #endregion
-
-    #region 调试API
-
-    public static int ActiveTaskCount
-    {
-        get
-        {
-            lock (_lockObject)
-            {
-                return _activeTasks.Count;
-            }
-        }
-    }
-
-    public static int TaskPoolCount
-    {
-        get
-        {
-            lock (_lockObject)
-            {
-                return _taskPool.Count;
-            }
-        }
-    }
-
-    public static string PerformanceSummary
-    {
-        get
-        {
-            return $"Tasks: {TotalTasksCreated} created, {TotalTasksCompleted} completed, {ActiveTaskCount} active\n"
-                + $"Peak: {PeakActiveTasks} active tasks\n"
-                + $"Pool: {TaskPoolCount}/{_maxPoolSize}";
-        }
-    }
-
-    public static List<string> GetActiveTaskDetails()
-    {
-        lock (_lockObject)
-        {
-            var details = new List<string>();
-            foreach (var task in _activeTasks)
-            {
-                string exceptionInfo =
-                    task.Exception != null ? $" | Exception: {task.Exception.Message}" : "";
-                details.Add(
-                    $"ID: {task.Id} | State: {task.State} | Elapsed: {task.GetElapsedTime():F2}s | "
-                        + $"Name: {(string.IsNullOrEmpty(task.Config.Name) ? "N/A" : task.Config.Name)} | "
-                        + $"Priority: {task.Config.Priority}{exceptionInfo}"
-                );
-            }
-            return details;
-        }
-    }
-
-    public static FlowHandle? FindTaskByName(string name)
-    {
-        if (string.IsNullOrEmpty(name))
-            return null;
-
-        lock (_lockObject)
-        {
-            foreach (var task in _activeTasks)
-            {
-                if (task.Config.Name == name && task.State != TaskState.Completed)
-                {
-                    return new FlowHandle(task.Id, task.Generation);
-                }
-            }
-        }
-        return null;
-    }
-
-    #endregion
-
-    #region 场景持久化配置
-    [Serializable]
-    public class SchedulerSettings
-    {
-        public bool DontDestroyOnLoad = true;
-        public InjectionPoint InjectionPoint = InjectionPoint.AfterPreLateUpdate;
-        public string CustomInjectionPoint;
-        public int InitialPoolSize = 50;
-        public int MaxPoolSize = 500;
-    }
-
-    private static SchedulerSettings _settings;
-
-    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
-    private static void LoadSettings()
-    {
-        // 在实际项目中，这里可以从配置文件加载设置
-        _settings = new SchedulerSettings();
-
-        // 应用设置
-        ConfigurePlayerLoopInjection(_settings.InjectionPoint, _settings.CustomInjectionPoint);
-
-        // 更新池大小
-        _initialPoolSize = _settings.InitialPoolSize;
-        _maxPoolSize = _settings.MaxPoolSize;
-        _poolTargetSize = _initialPoolSize;
-    }
-
-    public static void Configure(SchedulerSettings settings)
-    {
-        if (_isPlayerLoopInitialized)
-        {
-            Debug.LogWarning(
-                "[FlowScheduler] Already initialized. Some settings may not take effect."
+            UnityEngine.Debug.LogError(
+                $"任务 {task.Id} ({task.Name}) 回调异常: {ex.Message}\n{ex.StackTrace}"
             );
+            task.Callback?.Invoke(task.Id, false, ex);
+            lock (_lock)
+            {
+                _pendingRemove.Add(task.Id);
+            }
+            return;
         }
 
-        _settings = settings;
-        LoadSettings();
+        task.ExecutionCount++;
+
+        if (task.IsRepeating)
+        {
+            if (task.MaxRepeats > 0 && task.ExecutionCount >= task.MaxRepeats)
+            {
+                task.State = DelayTaskState.Completed;
+                task.Callback?.Invoke(task.Id, true);
+                lock (_lock)
+                {
+                    _pendingRemove.Add(task.Id);
+                }
+                return;
+            }
+
+            if (task.IsFrameBased)
+            {
+                task.CurrentFrame = 0;
+            }
+            else
+            {
+                // 精确计算下次触发时间（考虑时间缩放）
+                double scaledDuration = task.Duration / _timeScale;
+                double triggerTime = task.StartTime + scaledDuration;
+                task.StartTime = triggerTime;
+                task.ElapsedTime = 0;
+            }
+        }
+        else
+        {
+            task.State = DelayTaskState.Completed;
+            task.Callback?.Invoke(task.Id, true);
+            lock (_lock)
+            {
+                _pendingRemove.Add(task.Id);
+            }
+        }
     }
     #endregion
 
+    #region 公共接口
+    public int CreateDelay(
+        float duration,
+        Action<int> action,
+        bool repeat = false,
+        int maxRepeats = -1,
+        UnityEngine.Object target = null,
+        string name = "",
+        TaskCallback callback = null,
+        bool isFrameBased = false,
+        int frameDuration = 0
+    )
+    {
+        if (!isFrameBased && duration <= 0)
+        {
+            action?.Invoke(-1);
+            callback?.Invoke(-1, false);
+            return -1;
+        }
+
+        if (isFrameBased && frameDuration <= 0)
+        {
+            action?.Invoke(-1);
+            callback?.Invoke(-1, false);
+            return -1;
+        }
+
+        var task = GetTaskFromPool();
+        int newId;
+
+        lock (_lock)
+        {
+            newId = _idCounter++;
+            task.Initialize(
+                id: newId,
+                duration: duration,
+                action: action,
+                isRepeating: repeat,
+                maxRepeats: maxRepeats,
+                target: target,
+                startTime: GetPreciseTime(),
+                name: name,
+                callback: callback,
+                isFrameBased: isFrameBased,
+                frameDuration: frameDuration
+            );
+            _pendingAdd.Enqueue(task);
+        }
+
+        return newId;
+    }
+
+    public bool CancelDelay(int id)
+    {
+        if (id <= 0)
+            return false;
+
+        lock (_lock)
+        {
+            if (_tasks.TryGetValue(id, out var task) && !_pendingRemove.Contains(id))
+            {
+                task.State = DelayTaskState.Cancelled;
+                task.Callback?.Invoke(id, false);
+                _pendingRemove.Add(id);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public void StopAllDelays()
+    {
+        lock (_lock)
+        {
+            _pendingAdd.Clear();
+
+            foreach (var taskId in _tasks.Keys.ToList())
+            {
+                if (!_pendingRemove.Contains(taskId))
+                {
+                    if (_tasks.TryGetValue(taskId, out var task))
+                    {
+                        task.State = DelayTaskState.Cancelled;
+                        task.Callback?.Invoke(taskId, false);
+                    }
+                    _pendingRemove.Add(taskId);
+                }
+            }
+
+            UnityEngine.Debug.Log($"已停止所有延时任务 (总数: {_tasks.Count})");
+        }
+    }
+
+    public bool SetPaused(int id, bool paused)
+    {
+        if (id <= 0)
+            return false;
+
+        lock (_lock)
+        {
+            if (_tasks.TryGetValue(id, out var task))
+            {
+                task.IsPaused = paused;
+                if (paused)
+                {
+                    task.State = DelayTaskState.Paused;
+                    task.PausedElapsed = task.ElapsedTime;
+                    task.PausedFrame = task.CurrentFrame;
+                }
+                else
+                {
+                    if (task.IsFrameBased)
+                    {
+                        task.CurrentFrame = task.PausedFrame;
+                    }
+                    else
+                    {
+                        task.StartTime = GetPreciseTime() - (task.PausedElapsed / _timeScale);
+                        task.ElapsedTime = task.PausedElapsed;
+                    }
+                    task.State = DelayTaskState.Active;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public int DelayFrames(
+        int frames,
+        Action<int> action,
+        UnityEngine.Object target = null,
+        string name = ""
+    )
+    {
+        return CreateDelay(
+            duration: 0f,
+            action: action,
+            repeat: false,
+            maxRepeats: -1,
+            target: target,
+            name: name,
+            isFrameBased: true,
+            frameDuration: frames
+        );
+    }
+
+    public int DelaySeconds(
+        float seconds,
+        Action<int> action,
+        UnityEngine.Object target = null,
+        string name = ""
+    )
+    {
+        return CreateDelay(duration: seconds, action: action, target: target, name: name);
+    }
+    #endregion
+
+    #region 查询方法
+    public string GetTaskName(int id)
+    {
+        lock (_lock)
+        {
+            return _tasks.TryGetValue(id, out var t) ? t.Name : null;
+        }
+    }
+
+    public float? GetElapsedTime(int id)
+    {
+        lock (_lock)
+        {
+            return _tasks.TryGetValue(id, out var t) ? (float)t.ElapsedTime : null;
+        }
+    }
+
+    public float? GetTaskProgress(int id)
+    {
+        lock (_lock)
+        {
+            if (_tasks.TryGetValue(id, out var t))
+            {
+                if (t.IsFrameBased)
+                {
+                    return Mathf.Clamp01((float)t.CurrentFrame / t.FrameDuration);
+                }
+                else
+                {
+                    return Mathf.Clamp01((float)(t.ElapsedTime / t.Duration));
+                }
+            }
+            return null;
+        }
+    }
+
+    public float GetTaskDuration(int id)
+    {
+        lock (_lock)
+        {
+            return _tasks.TryGetValue(id, out var t) ? (float)t.Duration : 0f;
+        }
+    }
+
+    public bool IsTaskPaused(int id)
+    {
+        lock (_lock)
+        {
+            return _tasks.TryGetValue(id, out var t) && t.IsPaused;
+        }
+    }
+
+    public bool IsTaskRepeating(int id)
+    {
+        lock (_lock)
+        {
+            return _tasks.TryGetValue(id, out var t) && t.IsRepeating;
+        }
+    }
+
+    public int GetTaskExecutionCount(int id)
+    {
+        lock (_lock)
+        {
+            return _tasks.TryGetValue(id, out var t) ? t.ExecutionCount : 0;
+        }
+    }
+
+    public int GetTaskMaxRepeats(int id)
+    {
+        lock (_lock)
+        {
+            return _tasks.TryGetValue(id, out var t) ? t.MaxRepeats : 0;
+        }
+    }
+
+    public DelayTaskState? GetTaskState(int id)
+    {
+        lock (_lock)
+        {
+            return _tasks.TryGetValue(id, out var t) ? t.State : null;
+        }
+    }
+
+    public int ActiveTaskCount
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _tasks.Count;
+            }
+        }
+    }
+
+    public int TotalCreatedTasks
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _idCounter - 1;
+            }
+        }
+    }
+
+    public List<int> GetAllActiveTaskIds()
+    {
+        lock (_lock)
+        {
+            return new List<int>(_tasks.Keys);
+        }
+    }
+    #endregion
+
+    #region 辅助方法
+    private double GetPreciseTime()
+    {
+        // 防止长时间运行溢出
+        return _stopwatch.Elapsed.TotalSeconds % MAX_TIME;
+    }
+
+    private bool IsTargetValid(UnityEngine.Object target)
+    {
+        // Unity特定的null检查（处理销毁的Unity对象）
+        return target == null ? true : target != null;
+    }
+
+    private TimeTask GetTaskFromPool()
+    {
+        lock (_lock)
+        {
+            return _taskPool.Count > 0 ? _taskPool.Dequeue() : new TimeTask();
+        }
+    }
+
+    private void ReturnTaskToPool(TimeTask task)
+    {
+        lock (_lock)
+        {
+            if (_taskPool.Count < MAX_POOL_SIZE)
+            {
+                task.Reset();
+                _taskPool.Enqueue(task);
+            }
+            // 池满时直接丢弃，无需警告以减少日志开销
+        }
+    }
     #endregion
 }
 
+public class TimeTask
+{
+    public int Id { get; private set; }
+    public double Duration { get; private set; }
+    public Action<int> Action { get; private set; }
+    public bool IsRepeating { get; private set; }
+    public int MaxRepeats { get; private set; }
+    public int ExecutionCount { get; set; }
+    public double ElapsedTime { get; set; }
+    public double PausedElapsed { get; set; } // 暂停时保存的已用时间
+    public int CurrentFrame { get; set; }
+    public int FrameDuration { get; private set; }
+    public int PausedFrame { get; set; } // 暂停时保存的已用帧数
+    public bool IsFrameBased { get; private set; }
+    public double StartTime { get; set; }
+    public bool IsPaused { get; set; }
+    public UnityEngine.Object Target { get; private set; }
+    public DelayTaskState State { get; set; } = DelayTaskState.Pending;
+    public string Name { get; private set; }
+    public TaskCallback Callback { get; private set; }
+
+    public void Initialize(
+        int id,
+        float duration,
+        Action<int> action,
+        bool isRepeating,
+        int maxRepeats,
+        UnityEngine.Object target,
+        double startTime,
+        string name = "",
+        TaskCallback callback = null,
+        bool isFrameBased = false,
+        int frameDuration = 0
+    )
+    {
+        Id = id;
+        Duration = duration;
+        Action = action;
+        IsRepeating = isRepeating;
+        MaxRepeats = maxRepeats;
+        Target = target;
+        ExecutionCount = 0;
+        StartTime = startTime;
+        ElapsedTime = 0.0;
+        PausedElapsed = 0.0;
+        CurrentFrame = 0;
+        PausedFrame = 0;
+        FrameDuration = frameDuration;
+        IsFrameBased = isFrameBased;
+        IsPaused = false;
+        State = DelayTaskState.Pending;
+        Name = name;
+        Callback = callback;
+    }
+
+    public void Reset()
+    {
+        Id = 0;
+        Duration = 0;
+        Action = null;
+        IsRepeating = false;
+        MaxRepeats = -1;
+        Target = null;
+        ExecutionCount = 0;
+        ElapsedTime = 0.0;
+        PausedElapsed = 0.0;
+        CurrentFrame = 0;
+        PausedFrame = 0;
+        FrameDuration = 0;
+        IsFrameBased = false;
+        StartTime = 0;
+        IsPaused = false;
+        State = DelayTaskState.Pending;
+        Name = "";
+        Callback = null;
+    }
+}
+
+public enum DelayTaskState
+{
+    Pending,
+    Active,
+    Paused,
+    Completed,
+    Cancelled,
+}
+
+public delegate void TaskCallback(int taskId, bool success, Exception ex = null);
+
+```
+
+#### TimeManagerWindow
+
+放入 Assets/Editor 目录下，并在菜单栏 Tools/Time Manager Viewer 中打开。
+
+```csharp
+#if UNITY_EDITOR
+using UnityEditor;
+using UnityEngine;
+using System;
+using System.Linq;
+
+/// <summary>
+/// TimeManager 的可视化调试窗口
+/// 支持查看任务状态、暂停、恢复、取消、刷新，
+/// 自适应窗口宽度。
+/// </summary>
+public class TimeManagerWindow : EditorWindow
+{
+    private Vector2 scrollPos;
+    private bool autoRefresh = true;
+    private double lastRefreshTime;
+    private const double refreshInterval = 0.2; // 每0.3秒刷新一次
+
+    [MenuItem("Tools/Time Manager Viewer")]
+    public static void OpenWindow()
+    {
+        var window = GetWindow<TimeManagerWindow>("Time Manager");
+        window.minSize = new Vector2(720, 350);
+        window.Show();
+    }
+
+    private void OnEnable()
+    {
+        EditorApplication.update += OnEditorUpdate;
+    }
+
+    private void OnDisable()
+    {
+        EditorApplication.update -= OnEditorUpdate;
+    }
+
+    private void OnEditorUpdate()
+    {
+        if (autoRefresh && EditorApplication.timeSinceStartup - lastRefreshTime > refreshInterval)
+        {
+            Repaint();
+            lastRefreshTime = EditorApplication.timeSinceStartup;
+        }
+    }
+
+    private void OnGUI()
+    {
+        var mgr = TimeManager.Instance;
+        if (mgr == null)
+        {
+            EditorGUILayout.HelpBox(
+                "未找到 TimeManager 实例。请在场景中运行或手动创建。",
+                MessageType.Warning
+            );
+            return;
+        }
+
+        DrawHeader(mgr);
+
+        EditorGUILayout.Space();
+        EditorGUILayout.LabelField("🕒 当前活动任务", EditorStyles.boldLabel);
+        EditorGUILayout.Space();
+
+        var taskIds = mgr.GetAllActiveTaskIds();
+        if (taskIds.Count == 0)
+        {
+            EditorGUILayout.HelpBox("暂无活动任务。", MessageType.Info);
+            return;
+        }
+
+        scrollPos = EditorGUILayout.BeginScrollView(scrollPos);
+
+        foreach (var id in taskIds.OrderBy(i => i))
+        {
+            DrawTaskRow(mgr, id);
+        }
+
+        EditorGUILayout.EndScrollView();
+    }
+
+    private void DrawHeader(TimeManager mgr)
+    {
+        // 第一行：任务统计信息
+        EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+        {
+            GUILayout.Label($"任务总数: {mgr.TotalCreatedTasks}", GUILayout.Width(120));
+            GUILayout.Label($"活动任务: {mgr.ActiveTaskCount}", GUILayout.Width(120));
+            GUILayout.FlexibleSpace();
+        }
+        EditorGUILayout.EndHorizontal();
+
+        // 第二行：时间缩放控制
+        EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+        {
+            GUILayout.Label("全局时间缩放:", GUILayout.Width(100));
+            float newScale = EditorGUILayout.Slider(mgr.TimeScale, 0f, 5f, GUILayout.Width(300));
+            if (!Mathf.Approximately(newScale, mgr.TimeScale))
+                mgr.TimeScale = newScale;
+
+            GUILayout.FlexibleSpace();
+        }
+        EditorGUILayout.EndHorizontal();
+
+        // 第三行：控制按钮
+        EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+        {
+            autoRefresh = GUILayout.Toggle(autoRefresh, "自动刷新", GUILayout.Width(90));
+
+            GUI.backgroundColor = Color.yellow;
+            if (GUILayout.Button("刷新", GUILayout.Width(70)))
+                Repaint();
+            GUI.backgroundColor = Color.white;
+
+            GUI.backgroundColor = Color.red;
+            if (GUILayout.Button("全部停止", GUILayout.Width(90)))
+            {
+                if (EditorUtility.DisplayDialog("确认", "确定要停止所有延时任务吗？", "是", "否"))
+                    mgr.StopAllDelays();
+            }
+            GUI.backgroundColor = Color.white;
+
+            GUILayout.FlexibleSpace();
+        }
+        EditorGUILayout.EndHorizontal();
+    }
+
+    private void DrawTaskRow(TimeManager mgr, int id)
+    {
+        var state = mgr.GetTaskState(id);
+        var progress = mgr.GetTaskProgress(id) ?? 0f;
+        var elapsed = mgr.GetElapsedTime(id) ?? 0f;
+        var repeat = mgr.IsTaskRepeating(id);
+        var count = mgr.GetTaskExecutionCount(id);
+        var max = mgr.GetTaskMaxRepeats(id);
+        var paused = mgr.IsTaskPaused(id);
+        var duration = mgr.GetTaskDuration(id);
+        var name = mgr.GetTaskName(id) ?? ""; // 获取任务名称
+
+        // 计算剩余时间
+        float remainingTime = duration - elapsed;
+        if (remainingTime < 0)
+            remainingTime = 0;
+
+        // 自适应布局 - 根据窗口宽度调整显示方式
+        float windowWidth = EditorGUIUtility.currentViewWidth;
+        bool isWideScreen = windowWidth > 800;
+        bool isMediumScreen = windowWidth > 600;
+        bool isNarrowScreen = windowWidth <= 600;
+
+        EditorGUILayout.BeginVertical("box");
+        {
+            // 第一行：基本信息
+            EditorGUILayout.BeginHorizontal();
+            {
+                // ID和名称
+                GUILayout.Label($"ID: {id}", GUILayout.Width(80));
+
+                // 显示任务名称（如果存在）
+                if (!string.IsNullOrEmpty(name))
+                {
+                    GUILayout.Label($"名称: {name}", GUILayout.Width(isWideScreen ? 200 : 120));
+                }
+
+                // 状态显示
+                string stateText = state switch
+                {
+                    DelayTaskState.Active => "▶ 运行中",
+                    DelayTaskState.Paused => "⏸ 暂停",
+                    DelayTaskState.Pending => "⏱ 等待",
+                    _ => state.ToString(),
+                };
+                GUILayout.Label(stateText, GUILayout.Width(80));
+
+                // 任务类型
+                if (repeat)
+                {
+                    string repeatInfo =
+                        max < 0 ? $"重复任务 ({count})" : $"重复任务 ({count}/{max})";
+                    GUILayout.Label(repeatInfo, GUILayout.Width(isWideScreen ? 150 : 100));
+                }
+                else
+                {
+                    GUILayout.Label("单次任务", GUILayout.Width(80));
+                }
+
+                GUILayout.FlexibleSpace();
+
+                // 时间信息
+                if (isWideScreen)
+                {
+                    GUILayout.Label($"总时长: {duration:F2}s", GUILayout.Width(100));
+                    GUILayout.Label($"已用: {elapsed:F2}s", GUILayout.Width(80));
+                    GUILayout.Label($"剩余: {remainingTime:F2}s", GUILayout.Width(80));
+                }
+                else if (isMediumScreen)
+                {
+                    GUILayout.Label($"时长: {duration:F2}s", GUILayout.Width(80));
+                    GUILayout.Label($"剩余: {remainingTime:F2}s", GUILayout.Width(80));
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+
+            // 第二行：进度条
+            if (duration > 0)
+            {
+                float progressValue = Mathf.Clamp01(elapsed / duration);
+                Rect progressRect = EditorGUILayout.GetControlRect();
+                EditorGUI.ProgressBar(
+                    progressRect,
+                    progressValue,
+                    $"进度: {progressValue * 100:F1}%"
+                );
+            }
+
+            // 第三行：控制按钮
+            EditorGUILayout.BeginHorizontal();
+            {
+                GUILayout.FlexibleSpace();
+
+                // 暂停/恢复按钮
+                GUI.backgroundColor = paused
+                    ? new Color(0.4f, 0.8f, 0.4f)
+                    : new Color(1f, 0.9f, 0.3f);
+                if (
+                    GUILayout.Button(
+                        paused ? "▶ 恢复" : "⏸ 暂停",
+                        GUILayout.Width(80),
+                        GUILayout.Height(20)
+                    )
+                )
+                    mgr.SetPaused(id, !paused);
+
+                // 取消按钮
+                GUI.backgroundColor = new Color(1f, 0.4f, 0.4f);
+                if (GUILayout.Button("✖ 取消", GUILayout.Width(70), GUILayout.Height(20)))
+                    mgr.CancelDelay(id);
+
+                // 详情按钮（仅在宽屏显示）
+                if (isWideScreen)
+                {
+                    GUI.backgroundColor = new Color(0.6f, 0.6f, 1f);
+                    if (GUILayout.Button("ℹ 详情", GUILayout.Width(70), GUILayout.Height(20)))
+                    {
+                        ShowTaskDetails(mgr, id);
+                    }
+                }
+
+                GUILayout.FlexibleSpace();
+            }
+            EditorGUILayout.EndHorizontal();
+        }
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.Space(6);
+    }
+
+    private void ShowTaskDetails(TimeManager mgr, int id)
+    {
+        var state = mgr.GetTaskState(id);
+        var elapsed = mgr.GetElapsedTime(id) ?? 0f;
+        var duration = mgr.GetTaskDuration(id);
+        var repeat = mgr.IsTaskRepeating(id);
+        var count = mgr.GetTaskExecutionCount(id);
+        var max = mgr.GetTaskMaxRepeats(id);
+        var paused = mgr.IsTaskPaused(id);
+        var name = mgr.GetTaskName(id) ?? ""; // 获取任务名称
+
+        string message =
+            $"任务 {id} 详情:\n"
+            + $"名称: {name}\n" // 添加名称显示
+            + $"状态: {state}\n"
+            + $"类型: {(repeat ? "重复任务" : "单次任务")}\n"
+            + $"总时长: {duration:F2}秒\n"
+            + $"已用时间: {elapsed:F2}秒\n"
+            + $"剩余时间: {duration - elapsed:F2}秒\n"
+            + $"暂停状态: {paused}\n";
+
+        if (repeat)
+        {
+            message += $"执行次数: {count}\n";
+            message += $"最大重复次数: {(max < 0 ? "无限" : max.ToString())}";
+        }
+
+        EditorUtility.DisplayDialog("任务详情", message, "关闭");
+    }
+}
+#endif
 
 ```

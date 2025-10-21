@@ -1,15 +1,15 @@
 ---
-title: 'C# 队列和双端队列'
-titleColor: '#aaa,#0ae9ad'
-titleIcon: 'asset:markdown'
-tags: [ 'c#' ]
-categories: [ 'Code' ]
-description: '队列无法插队，所以需要双端队列'
-publishDate: '2023-03-10'
-updatedDate: '2023-03-13'
+title: "C# 队列和双端队列"
+titleColor: "#aaa,#0ae9ad"
+titleIcon: "asset:markdown"
+tags: ["csharp"]
+categories: ["Code"]
+description: "队列无法插队，所以需要双端队列"
+publishDate: "2023-03-10"
+updatedDate: "2023-03-13"
 ---
 
-#### 队列 Queue  
+#### 队列 Queue
 
 ```c#
 private Queue barrageQueue;
