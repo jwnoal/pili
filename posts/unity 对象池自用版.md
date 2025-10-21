@@ -24,7 +24,7 @@ void Start()
     {
         PreloadCount = 10,
         AutoScale = true,
-        MaxSize = 50,
+        //MaxSize = 50,
         DontDestroyOnLoad = true
     };
     ObjectPoolManager.CreatePool(prefab, config);
