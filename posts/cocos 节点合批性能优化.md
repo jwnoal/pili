@@ -7,25 +7,25 @@ categories: ["Code"]
 description: "节点树纵向优先改横向优先"
 publishDate: "2023-03-12"
 updatedDate: "2023-03-12"
-password: 'pilipal'
+password: "1231234"
 ---
 
-#### 创建脚本LevelRender.ts并挂载到父节点
+#### 创建脚本 LevelRender.ts 并挂载到父节点
 
 ```js
-import { _decorator, Component, Node } from 'cc';
+import { _decorator, Component, Node } from "cc";
 const { ccclass, property, menu } = _decorator;
 
-@ccclass('LevelRender')
+@ccclass("LevelRender")
 @menu("性能优化/LevelRender")
 export class LevelRender extends Component {
-    onLoad() {
-        this.node[`__enableLevelRender`] = true;
-    }
+  onLoad() {
+    this.node[`__enableLevelRender`] = true;
+  }
 }
 ```
 
-#### 创建脚本并初始化 
+#### 创建脚本并初始化
 
 全局初始化
 
@@ -34,6 +34,7 @@ CCCExtension.init();
 ```
 
 创建文件
+
 ```js
 import { View } from "cc";
 import { EditBox } from "cc";
